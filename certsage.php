@@ -14,7 +14,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 
 class CertSage
 {
-  public $version = "1.4.0";
+  public $version = "1.4.1";
   public $dataDirectory = "../CertSage";
 
   private $password;
@@ -264,7 +264,7 @@ class CertSage
 
     // *** GENERATE RANDOM PASSWORD ***
 
-    $this->password = $this->encodeBase64(random_bytes(15));
+    $this->password = $this->encodeBase64(openssl_random_pseudo_bytes(15));
 
     // *** WRITE PASSWORD FILE ***
 
