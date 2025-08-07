@@ -2,7 +2,7 @@
 
 /*
 CertSage (support@griffin.software)
-Copyright 2022 Griffin Software (https://griffin.software)
+Copyright 2021-2025 Griffin Software (https://griffin.software)
 
 PHP 7.0+ required
 
@@ -14,7 +14,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 
 class CertSage
 {
-  public $version = "1.4.3";
+  public $version = "2.0.0";
   public $dataDirectory = "../CertSage";
   public $autorenew;
   public $certificateExists;
@@ -927,7 +927,6 @@ class CertSage
 
     $output = `uapi SSL install_ssl domain=$domain cert=$cert key=$key --output=json`;
 
-    // !!! need to test with shell turned off in cPanel
     if ($output === false)
       throw new Exception("shell execution pipe could not be established");
 
@@ -943,9 +942,16 @@ class CertSage
       throw new Exception("uapi SSL toggle_ssl_redirect_for_domains failed");
 
     if (!isset($this->autorenew))
+    {
       $this->writeFile($this->dataDirectory . "/autorenew.txt",
                        "yes",
                        0644);
+
+      $output = `(crontab -l 2>/dev/null; echo "30 15 * * * curl https://$domain/certsage.php") | crontab -`;
+
+      if ($output === false)
+        throw new Exception("shell execution pipe could not be established");
+    }
   }
 
   public function updateContact()
@@ -1005,8 +1011,9 @@ try
         && $certsage->certificateExists
         && $certsage->shouldRenewNow)
     {
-      $_POST["environment"] = "staging";
       $_POST["domainNames"] = $certsage->domainNames;
+      $_POST["keyType"] = $certsage->keyType;
+      $_POST["environment"] = "production";
       $certsage->acquireCertificate();
       $certsage->installCertificate();
     }
@@ -1234,7 +1241,7 @@ footer a
 <ul>
 <li>&#x1F9D9;&#x1F3FC;&#x200D;&#x2642;&#xFE0F; CertSage</li>
 <li>version <?= $certsage->version ?></li>
-<li><a href="https://community.letsencrypt.org/t/certsage-acme-client-version-1-4-3-easy-webpage-interface-optimized-for-cpanel-no-commands-to-type-root-not-required/233134" target="_blank">official download and help page</a></li>
+<li><a href="https://community.letsencrypt.org/t/certsage-acme-client-version-2-0-0-easy-webpage-interface-optimized-for-cpanel-no-commands-to-type-root-not-required-fully-automated-certificate-renewals/233218" target="_blank">official download and help page</a></li>
 <li>support@griffin.software</li>
 </ul>
 </header>
@@ -1422,7 +1429,7 @@ This should never happen.
 <li><a href="https://venmo.com/code?user_id=3205885367156736024" target="_blank">Donate to @CertSage via Venmo</a></li>
 <li><a href="https://paypal.me/CertSage" target="_blank">Donate to @CertSage via PayPal</a></li>
 <li><a href="https://letsencrypt.org/donate/" target="_blank">Donate to Let's Encrypt</a></li>
-<li>&copy; 2021-2024 <a href="https://griffin.software" target="_blank">Griffin Software</a></li>
+<li>&copy; 2021-2025 <a href="https://griffin.software" target="_blank">Griffin Software</a></li>
 </ul>
 </footer>
 <div id="wait"><span id="hourglass">&#x23F3;</span></div>
