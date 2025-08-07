@@ -18,14 +18,14 @@ Assuming that your domain name is `example.com`...
 Assuming that your domain name is `example.com`...
 
 1. Visit `http://example.com/certsage.php`.
-2. Enter the (sub)domain names in the Fully Qualified Domain Names box, one per line, for which you wish to acquire a certificate (e.g. `example.com` and `www.example.com`).
-3. Ignore the Email Address box as it is no longer supported by Let's Encrypt.
-4. Select the Staging Environment if you want to confirm that your CertSage installation is working properly or the Production Environment if you are confident that your CertSage installation is working properly.
-5. Enter your code into the Code box from your `code.txt` file found in your `CertSage` data directory, which is located in the parent directory of the directory where you uploaded `certsage.php`.
+2. Enter your code into the Code box from your `code.txt` file found in your `CertSage` data directory, which is located in the parent directory of the directory where you uploaded `certsage.php`.
+3. Select the Staging Environment if you want to confirm that your CertSage installation is working properly or the Production Environment if you are confident that your CertSage installation is working properly.
+4. Ignore the Email Addresses box as it is no longer supported by Let's Encrypt.
+5. Enter the (sub)domain names in the Domain Names box, one per line, for which you wish to acquire a certificate (e.g. `example.com` and `www.example.com`).
 6. Press the Proceed button.
 
 > [!NOTE]
-> If you selected the Staging Environment in step 4, you will need to repeat the Certificate Acquisition steps with selecting the Production Environment in step 4.
+> If you selected the Staging Environment in step 3, you will need to repeat the Certificate Acquisition steps with selecting the Production Environment in step 3.
 
 # Certificate Installation in cPanel
 
@@ -46,7 +46,7 @@ Assuming that your domain name is `example.com`...
 15. Select your domain name in the drop-down list.
 16. Paste your certificate in the Certificate box.
 17. Switch back to the File Manager tab.
-18. Click on the `private.key` file.
+18. Click on the `certificate.key` file.
 19. Click *Edit*.
 20. Copy the private key in the file including its header and footer.
 21. Click *Close*.
