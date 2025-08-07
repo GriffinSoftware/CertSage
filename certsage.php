@@ -14,8 +14,16 @@ Usage of this software constitutes acceptance of full liability for any conseque
 
 class CertSage
 {
-  public $version = "1.4.2";
+  public $version = "1.4.3";
   public $dataDirectory = "../CertSage";
+  public $autorenew;
+  public $certificateExists;
+  public $validFrom;
+  public $validTo;
+  public $renewAt;
+  public $shouldRenewNow;
+  public $domainNames;
+  public $keyType;
 
   private $password;
   private $accountKey;
@@ -251,38 +259,30 @@ class CertSage
 
   public function initialize()
   {
-    // *** CREATE DATA DIRECTORY ***
-
     $this->createDirectory($this->dataDirectory, 0755);
 
-    // *** READ PASSWORD FILE ***
+    $this->autorenew = $this->readFile($this->dataDirectory . "/autorenew.txt");
 
     $this->password = $this->readFile($this->dataDirectory . "/password.txt");
 
-    if (isset($this->password))
-      return;
+    if (!isset($this->password))
+    {
+      $this->password = $this->encodeBase64(openssl_random_pseudo_bytes(15));
 
-    // *** GENERATE RANDOM PASSWORD ***
-
-    $this->password = $this->encodeBase64(openssl_random_pseudo_bytes(15));
-
-    // *** WRITE PASSWORD FILE ***
-
-    $this->writeFile($this->dataDirectory . "/password.txt",
-                     $this->password,
-                     0644);
+      $this->writeFile($this->dataDirectory . "/password.txt",
+                       $this->password,
+                       0644);
+    }
   }
 
-  public function extractDomainNames()
+  public function extractCertificateInfo()
   {
-    // *** READ CERTIFICATE ***
-
     $certificate = $this->readFile($this->dataDirectory . "/certificate.crt");
 
-    if (!isset($certificate))
-      return "";
+    $this->certificateExists = isset($certificate);
 
-    // *** EXTRACT CERTIFICATE ***
+    if (!$this->certificateExists)
+      return;
 
     $regex = "~^(-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END CERTIFICATE-----)~";
     $outcome = preg_match($regex, $certificate, $matches);
@@ -295,22 +295,42 @@ class CertSage
 
     $certificate = $matches[1];
 
-    // *** CHECK CERTIFICATE ***
-
     $certificateObject = openssl_x509_read($certificate);
 
     if ($certificateObject === false)
       throw new Exception("check certificate failed");
-
-    // *** EXTRACT DOMAIN NAMES ***
 
     $certificateData = openssl_x509_parse($certificateObject);
 
     if ($certificateData === false)
       throw new Exception("parse certificate failed");
 
+    // *** EXTRACT DATES ***
+
+    if (!isset($certificateData["validFrom_time_t"]))
+      throw new Exception("validFrom_time_t not found in certificate");
+
+    $validFrom = (int)$certificateData["validFrom_time_t"];
+
+    $this->validFrom = gmdate("M j, Y g:i:s A", $validFrom);
+
+    if (!isset($certificateData["validTo_time_t"]))
+      throw new Exception("validTo_time_t not found in certificate");
+
+    $validTo = (int)$certificateData["validTo_time_t"];
+
+    $this->validTo = gmdate("M j, Y g:i:s A", $validTo);
+
+    $renewAt = intdiv($validFrom + $validTo * 2, 3);
+
+    $this->renewAt = gmdate("M j, Y g:i:s A", $renewAt);
+
+    $this->shouldRenewNow = time() >= $renewAt;
+
+    // *** EXTRACT DOMAIN NAMES ***
+
     if (!isset($certificateData["extensions"]["subjectAltName"]))
-      return "";
+      throw new Exception("SAN extension not found in certificate");
 
     $sans = explode(", ", $certificateData["extensions"]["subjectAltName"]);
 
@@ -319,20 +339,49 @@ class CertSage
       list($type, $value) = explode(":", $san);
 
       if ($type !== "DNS")
-        return "";
+        throw new Exception("Non-DNS SAN found in certificate");
 
       $san = $value;
     }
 
     unset($san);
 
-    return implode("\n", $sans);
+    $this->domainNames = implode("\n", $sans);
+
+    // *** EXTRACT KEY TYPE ***
+
+    $certificateKeyObject = openssl_pkey_get_public($certificateObject);
+
+    if ($certificateKeyObject === false)
+      throw new Exception("check certificate key failed");
+
+    $certificateKeyDetails = openssl_pkey_get_details($certificateKeyObject);
+
+    if ($certificateKeyDetails === false)
+      throw new Exception("get certificate key details failed");
+
+    switch ($certificateKeyDetails["type"])
+    {
+      case OPENSSL_KEYTYPE_RSA:
+
+        $this->keyType = "RSA";
+
+        break;
+
+      case OPENSSL_KEYTYPE_EC:
+
+        $this->keyType = "EC";
+
+        break;
+
+      default:
+
+        throw new Exception("unsupported keyType: " . $certificateKeyDetails["type"]);
+    }
   }
 
   public function checkPassword()
   {
-    // *** CHECK PASSWORD ***
-
     if (!isset($_POST["password"]))
       throw new Exception("password was missing");
 
@@ -394,7 +443,6 @@ class CertSage
       // *** GENERATE ACCOUNT KEY ***
 
       $options = [
-        "digest_alg"       => "sha256",
         "private_key_bits" => 2048,
         "private_key_type" => OPENSSL_KEYTYPE_RSA
       ];
@@ -611,11 +659,30 @@ class CertSage
 
       // *** GENERATE CERTIFICATE KEY ***
 
-      $options = [
-        "digest_alg"       => "sha256",
-        "private_key_bits" => 2048,
-        "private_key_type" => OPENSSL_KEYTYPE_RSA
-      ];
+      switch ($_POST["keyType"])
+      {
+        case "RSA":
+  
+          $options = [
+            "private_key_bits" => 2048,
+            "private_key_type" => OPENSSL_KEYTYPE_RSA
+          ];
+  
+          break;
+  
+        case "EC":
+  
+          $options = [
+            "curve_name" => "secp384r1",
+            "private_key_type" => OPENSSL_KEYTYPE_EC
+          ];
+  
+          break;
+  
+        default:
+  
+          throw new Exception("unknown keyType: " . $_POST["keyType"]);
+      }
 
       $certificateKeyObject = openssl_pkey_new($options);
 
@@ -874,6 +941,11 @@ class CertSage
 
     if (!isset($output))
       throw new Exception("uapi SSL toggle_ssl_redirect_for_domains failed");
+
+    if (!isset($this->autorenew))
+      $this->writeFile($this->dataDirectory . "/autorenew.txt",
+                       "yes",
+                       0644);
   }
 
   public function updateContact()
@@ -924,14 +996,27 @@ try
 
   if (!isset($_POST["action"]))
   {
-    $domainNames = $certsage->extractDomainNames();
-
     $page = "welcome";
+
+    $certsage->extractCertificateInfo();
+
+    if (   isset($certsage->autorenew)
+        && $certsage->autorenew === "yes"
+        && $certsage->certificateExists
+        && $certsage->shouldRenewNow)
+    {
+      $_POST["environment"] = "staging";
+      $_POST["domainNames"] = $certsage->domainNames;
+      $certsage->acquireCertificate();
+      $certsage->installCertificate();
+    }
   }
   elseif (!is_string($_POST["action"]))
     throw new Exception("action was not a string");
   else
   {
+    $page = "success";
+
     $certsage->checkpassword();
 
     switch ($_POST["action"])
@@ -958,15 +1043,13 @@ try
 
         throw new Exception("unknown action: " . $_POST["action"]);
     }
-
-    $page = "success";
   }
 }
 catch (Exception $e)
 {
-  $error = $e->getMessage();
-
   $page = "trouble";
+
+  $error = $e->getMessage();
 }
 ?>
 <!DOCTYPE html>
@@ -974,6 +1057,7 @@ catch (Exception $e)
 <head>
 <meta charset="utf-8">
 <title>CertSage</title>
+<meta name="description" content="CertSage">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#e1b941">
 <meta name="referrer" content="origin">
@@ -985,108 +1069,22 @@ catch (Exception $e)
   margin: 0;
   border: none;
   padding: 0;
+  font-weight: normal;
 }
 
 html
 {
   background: #4169e1;
   font: 100%/1.5 sans-serif;
-  color: black;
 }
 
 body
 {
-  margin: auto;
+  position: relative;
+  margin: 0 auto;
   max-width: 34rem;
   padding: 1.5rem;
-}
-
-header, main, footer, hr, article,
-h1, h2, h3, h4, h5, h6, p, form
-{
-  margin-bottom: 1.5rem;
-}
-
-:last-child
-{
-  margin-bottom: 0;
-}
-
-hr
-{
-  border-bottom: 1px solid;
-}
-
-header, article
-{
-  border-radius: 1.5rem;
-  padding: 1.5rem;
-  background: rgba(255,255,255,0.80);
-}
-
-header
-{
-  text-align: center;
-}
-
-header > span
-{
-  font-size: 2rem;
-  font-family: fantasy;
-}
-
-header a
-{
-  text-decoration: none;
-  color: inherit;
-}
-
-footer
-{
-  text-align: center;
-  color: rgba(255,255,255,0.80);
-}
-
-footer a
-{
-  color: inherit;
-}
-
-h1, h2, h3, h4, h5, h6
-{
-  text-align: center;
-  font-weight: normal;
-  line-height: 1;
-}
-
-h1
-{
-  font-size: calc(24rem / 12);
-}
-
-h2
-{
-  font-size: calc(18rem / 12);
-}
-
-h3
-{
-  font-size: calc(14rem / 12);
-}
-
-h4
-{
-  font-size: calc(16rem / 12);
-}
-
-h5
-{
-  font-size: calc(10rem / 12);
-}
-
-h6
-{
-  font-size: calc(8rem / 12);
+  color: black;
 }
 
 a
@@ -1094,9 +1092,47 @@ a
   -webkit-tap-highlight-color: transparent;
 }
 
+header, main
+{
+  border-radius: 1.5rem;
+  padding: 1.5rem;
+  background: rgba(255,255,255,0.80);
+}
+
+main, form, p, footer
+{
+  margin-top: 1.5rem;
+}
+
+header li
+{
+  display: block;
+  text-align: center;
+}
+
+header li:first-child
+{
+  font-size: 2rem;
+  line-height: 2.5rem;
+  font-family: fantasy;
+}
+
+h1
+{
+  text-align: center;
+  font-size: 2rem;
+  line-height: 2.5rem;
+}
+
 form
 {
   text-align: center;
+}
+
+h2
+{
+  font-size: 1.5rem;
+  line-height: 2rem;
 }
 
 textarea, input
@@ -1113,17 +1149,21 @@ textarea, input
   color: inherit;
 }
 
+input[type="radio"]
+{
+  margin-top: 0;
+  box-shadow: none;
+  width: auto;
+  border-radius: 0;
+  padding: 0;
+}
+
 textarea
 {
   text-align: left;
 }
 
-input[type=radio]
-{
-  display: none;
-}
-
-input[type=radio] + span, button
+button
 {
   display: inline-block;
   margin: 0.75rem 0.375rem 0;
@@ -1133,7 +1173,6 @@ input[type=radio] + span, button
   padding: 0.75rem;
   background: lightgray;
   font-size: 1rem;
-  line-height: 1;
 }
 
 button
@@ -1143,11 +1182,29 @@ button
   color: inherit;
 }
 
-input[type=radio]:checked + span, button:active
+button:active
 {
   box-shadow: 0 0 0.375rem 0 black inset;
   border: 0.1875rem solid rgba(0,0,0,0.50);
   font-weight: bold;
+}
+
+footer li
+{
+  display: block;
+  margin-top: 1.5rem;
+  text-align: center;
+  color: rgba(255,255,255,0.80);
+}
+
+footer li:first-child
+{
+  margin-top: 0;
+}
+
+footer a
+{
+  color: inherit;
 }
 
 #wait
@@ -1169,41 +1226,55 @@ input[type=radio]:checked + span, button:active
   width: 25vmin;
   height: 25vmin;
   font-size: 25vmin;
-  line-height: 1;
 }
 </style>
 </head>
 <body>
-
 <header>
-<span>&#x1F9D9;&#x1F3FC;&#x200D;&#x2642;&#xFE0F; CertSage</span><br>
-version <?= $certsage->version ?><br>
-<a href="mailto:support@griffin.software">support@griffin.software</a>
+<ul>
+<li>&#x1F9D9;&#x1F3FC;&#x200D;&#x2642;&#xFE0F; CertSage</li>
+<li>version <?= $certsage->version ?></li>
+<li><a href="https://community.letsencrypt.org/t/certsage-acme-client-version-1-4-3-easy-webpage-interface-optimized-for-cpanel-no-commands-to-type-root-not-required/233134" target="_blank">official download and help page</a></li>
+<li>support@griffin.software</li>
+</ul>
 </header>
 
 <main>
-<article>
 <?php
   switch ($page):
     case "welcome":
 ?>
-
 <h1>Welcome!</h1>
-<p>
-CertSage is an <a href="https://tools.ietf.org/html/rfc8555" target="_blank">ACME</a> client that acquires free <a href="https://en.m.wikipedia.org/wiki/Domain-validated_certificate" target="_blank">DV TLS/SSL certificates</a> from <a href="https://letsencrypt.org/about/" target="_blank">Let's Encrypt</a> by satisfying an <a href="https://letsencrypt.org/docs/challenge-types/#http-01-challenge" target="_blank">HTTP-01 challenge</a> for each <a href="https://en.m.wikipedia.org/wiki/Domain_name" target="_blank">domain name</a> to be covered by a certificate.
-By using CertSage, you are agreeing to the <a href="https://letsencrypt.org/repository/" target="_blank">Let's Encrypt Subscriber Agreement</a>.
-Please use the <a href="https://letsencrypt.org/docs/staging-environment/" target="_blank">staging environment</a> for testing to avoid hitting the <a href="https://letsencrypt.org/docs/rate-limits/" target="_blank">rate limits</a>.
-</p>
 
-<hr>
+<p>CertSage is an <a href="https://tools.ietf.org/html/rfc8555" target="_blank">ACME</a> client that acquires free <a href="https://en.m.wikipedia.org/wiki/Domain-validated_certificate" target="_blank">DV TLS/SSL certificates</a> from <a href="https://letsencrypt.org/about/" target="_blank">Let's Encrypt</a> by satisfying an <a href="https://letsencrypt.org/docs/challenge-types/#http-01-challenge" target="_blank">HTTP-01 challenge</a> for each <a href="https://en.m.wikipedia.org/wiki/Domain_name" target="_blank">domain name</a> to be covered by a certificate. By using CertSage, you are agreeing to the <a href="https://letsencrypt.org/repository/#let-s-encrypt-subscriber-agreement" target="_blank">Let's Encrypt Subscriber Agreement</a>. Please use the <a href="https://letsencrypt.org/docs/staging-environment/" target="_blank">staging environment</a> for testing to avoid hitting <a href="https://letsencrypt.org/docs/rate-limits/" target="_blank">rate limits</a>.</p>
 
 <form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
 <h2>Acquire Certificate</h2>
+<?php
+      if ($certsage->certificateExists):
+?>
+
+<p>
+Existing Certificate Details<br>
+Issued: <?= $certsage->validFrom ?> UTC<br>
+Renew: <?= $certsage->renewAt ?> UTC<br>
+Expires: <?= $certsage->validTo ?> UTC<br>
+Should Renew Now: <?= $certsage->shouldRenewNow ? "Yes" : "No" ?><br>
+</p>
+<?php
+      endif;
+?>
 
 <p>
 One domain name per line<br>
 No wildcards (*) allowed<br>
-<textarea name="domainNames" rows="5"><?= $domainNames ?></textarea>
+<textarea name="domainNames" rows="5"><?= $certsage->domainNames ?></textarea>
+</p>
+
+<p>
+Key Type<br>
+<input name="keyType" value="RSA" type="radio" <?= (!isset($certsage->keyType) || $certsage->keyType === "RSA") ? "checked" : "" ?>> RSA (more compatible)<br>
+<input name="keyType" value="EC" type="radio" <?= (isset($certsage->keyType) && $certsage->keyType === "EC") ? "checked" : "" ?>> EC (more efficient)
 </p>
 
 <p>
@@ -1217,8 +1288,6 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <button name="environment" value="staging" type="submit">Acquire Staging Certificate</button>
 <button name="environment" value="production" type="submit">Acquire Production Certificate</button>
 </form>
-
-<hr>
 
 <form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
 <h2>Install Certificate into cPanel</h2>
@@ -1234,10 +1303,8 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <button name="environment" value="production" type="submit">Install Certificate into cPanel</button>
 </form>
 
-<hr>
-
 <form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
-<h2>Receive Certificate Expiration Notifications</h2>
+<h2>Receive Let's Encrypt Notifications</h2>
 
 <p>
 One email address per line<br>
@@ -1255,7 +1322,6 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 
 <button name="environment" value="production" type="submit">Update Contact Information</button>
 </form>
-
 <?php
       break;
     case "success":
@@ -1264,7 +1330,6 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
           switch ($_POST["environment"]):
             case "staging":
 ?>
-
 <h1>Success!</h1>
 
 <p>Your staging certificate was acquired. It was not saved to prevent accidental installation.</p>
@@ -1274,12 +1339,10 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
 <p><a href="">Go back to the beginning</a></p>
-
 <?php
               break;
             case "production":
 ?>
-
 <h1>Success!</h1>
 
 <p>Your production certificate was acquired. It was saved in <?= $certsage->dataDirectory ?>.</p>
@@ -1289,7 +1352,6 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
 <p><a href="">Go back to the beginning</a></p>
-
 <?php
               break;
           endswitch;
@@ -1298,14 +1360,11 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
           switch ($_POST["environment"]):
             case "staging":
 ?>
-
-
-
+This should never happen.
 <?php
               break;
             case "production":
 ?>
-
 <h1>Success!</h1>
 
 <p>Your certificate was installed into cPanel.</p>
@@ -1315,7 +1374,6 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
 <p><a href="">Go back to the beginning</a></p>
-
 <?php
               break;
           endswitch;
@@ -1324,14 +1382,11 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
           switch ($_POST["environment"]):
             case "staging":
 ?>
-
-
-
+This should never happen.
 <?php
               break;
             case "production":
 ?>
-
 <h1>Success!</h1>
 
 <p>Your contact information was updated.</p>
@@ -1341,7 +1396,6 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
 <p><a href="">Go back to the beginning</a></p>
-
 <?php
               break;
           endswitch;
@@ -1350,7 +1404,6 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
       break;
     case "trouble":
 ?>
-
 <h1>Trouble...</h1>
 
 <p><?= $error ?></p>
@@ -1358,25 +1411,20 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <p>If you need help with resolving this issue, please post a topic in the help category of the <a href="https://community.letsencrypt.org/" target="_blank">Let's Encrypt Community</a>.</p>
 
 <p><a href="">Go back to the beginning</a></p>
-
 <?php
       break;
   endswitch;
 ?>
-</article>
 </main>
 
 <footer>
-<a href="https://venmo.com/code?user_id=3205885367156736024" target="_blank">Donate to @CertSage via Venmo</a><br>
-<br>
-<a href="https://paypal.me/CertSage" target="_blank">Donate to @CertSage via PayPal</a><br>
-<br>
-<a href="https://letsencrypt.org/donate/" target="_blank">Donate to Let's Encrypt</a><br>
-<br>
-&copy; 2022 <a href="https://griffin.software" target="_blank">Griffin Software</a>
+<ul>
+<li><a href="https://venmo.com/code?user_id=3205885367156736024" target="_blank">Donate to @CertSage via Venmo</a></li>
+<li><a href="https://paypal.me/CertSage" target="_blank">Donate to @CertSage via PayPal</a></li>
+<li><a href="https://letsencrypt.org/donate/" target="_blank">Donate to Let's Encrypt</a></li>
+<li>&copy; 2021-2024 <a href="https://griffin.software" target="_blank">Griffin Software</a></li>
+</ul>
 </footer>
-
 <div id="wait"><span id="hourglass">&#x23F3;</span></div>
-
 </body>
 </html>
