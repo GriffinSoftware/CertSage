@@ -2,7 +2,7 @@
 
 /*
 CertSage (support@griffin.software)
-Copyright 2021 Griffin Software (https://griffin.software)
+Copyright 2022 Griffin Software (https://griffin.software)
 
 PHP 7.0+ required
 
@@ -14,7 +14,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 
 class CertSage
 {
-  public $version = "1.3.0";
+  public $version = "1.4.0";
   public $dataDirectory = "../CertSage";
 
   private $password;
@@ -271,6 +271,62 @@ class CertSage
     $this->writeFile($this->dataDirectory . "/password.txt",
                      $this->password,
                      0644);
+  }
+
+  public function extractDomainNames()
+  {
+    // *** READ CERTIFICATE ***
+
+    $certificate = $this->readFile($this->dataDirectory . "/certificate.crt");
+
+    if (!isset($certificate))
+      return "";
+
+    // *** EXTRACT CERTIFICATE ***
+
+    $regex = "~^(-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END CERTIFICATE-----)~";
+    $outcome = preg_match($regex, $certificate, $matches);
+
+    if ($outcome === false)
+      throw new Exception("extract certificate failed");
+
+    if ($outcome === 0)
+      throw new Exception("certificate format mismatch");
+
+    $certificate = $matches[1];
+
+    // *** CHECK CERTIFICATE ***
+
+    $certificateObject = openssl_x509_read($certificate);
+
+    if ($certificateObject === false)
+      throw new Exception("check certificate failed");
+
+    // *** EXTRACT DOMAIN NAMES ***
+
+    $certificateData = openssl_x509_parse($certificateObject);
+
+    if ($certificateData === false)
+      throw new Exception("parse certificate failed");
+
+    if (!isset($certificateData["extensions"]["subjectAltName"]))
+      return "";
+
+    $sans = explode(", ", $certificateData["extensions"]["subjectAltName"]);
+
+    foreach ($sans as &$san)
+    {
+      list($type, $value) = explode(":", $san);
+
+      if ($type !== "DNS")
+        return "";
+
+      $san = $value;
+    }
+
+    unset($san);
+
+    return implode("\n", $sans);
   }
 
   public function checkPassword()
@@ -750,14 +806,46 @@ class CertSage
     if (!openssl_x509_check_private_key($certificateObject, $certificateKeyObject))
       throw new Exception("certificate and certificate key do not correspond");
 
-    // *** INSTALL CERTIFICATE ***
+    // *** EXTRACT DOMAIN NAMES ***
 
     $certificateData = openssl_x509_parse($certificateObject);
 
     if ($certificateData === false)
       throw new Exception("parse certificate failed");
 
-    $domain = $certificateData["subject"]["CN"];
+    if (!isset($certificateData["extensions"]["subjectAltName"]))
+      throw new Exception("No SANs found in certificate");
+
+    $sans = explode(", ", $certificateData["extensions"]["subjectAltName"]);
+
+    foreach ($sans as &$san)
+    {
+      list($type, $value) = explode(":", $san);
+
+      if ($type !== "DNS")
+        throw new Exception("Non-DNS SAN found in certificate");
+
+      $san = $value;
+    }
+
+    unset($san);
+
+    // *** INSTALL CERTIFICATE ***
+
+    $domain = $sans[0];
+    $domainLength = strlen($sans[0]);
+
+    foreach ($sans as $san)
+    {
+      $sanLength = strlen($san);
+
+      if ($domainLength <= $sanLength)
+        continue;
+
+      $domain = $san;
+      $domainLength = $sanLength;
+    }
+
     $cert   = rawurlencode($certificate);
     $key    = rawurlencode($certificateKey);
 
@@ -777,7 +865,6 @@ class CertSage
 
     if (!isset($output))
       throw new Exception("uapi SSL toggle_ssl_redirect_for_domains failed");
-
   }
 
   public function updateContact()
@@ -827,7 +914,11 @@ try
   $certsage->initialize();
 
   if (!isset($_POST["action"]))
+  {
+    $domainNames = $certsage->extractDomainNames();
+
     $page = "welcome";
+  }
   elseif (!is_string($_POST["action"]))
     throw new Exception("action was not a string");
   else
@@ -1103,7 +1194,7 @@ Please use the <a href="https://letsencrypt.org/docs/staging-environment/" targe
 <p>
 One domain name per line<br>
 No wildcards (*) allowed<br>
-<textarea name="domainNames" rows="5"></textarea>
+<textarea name="domainNames" rows="5"><?= $domainNames ?></textarea>
 </p>
 
 <p>
@@ -1273,7 +1364,7 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <br>
 <a href="https://letsencrypt.org/donate/" target="_blank">Donate to Let's Encrypt</a><br>
 <br>
-&copy; 2021 <a href="https://griffin.software" target="_blank">Griffin Software</a>
+&copy; 2022 <a href="https://griffin.software" target="_blank">Griffin Software</a>
 </footer>
 
 <div id="wait"><span id="hourglass">&#x23F3;</span></div>
