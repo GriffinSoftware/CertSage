@@ -19,13 +19,17 @@ Assuming that your domain name is `example.com`...
 
 1. Visit `http://example.com/certsage.php`.
 2. Enter the (sub)domain names in the box, one per line, for which you wish to acquire a certificate (e.g. `example.com` and `www.example.com`).
-3. Enter your password into the Password box from your `password.txt` file found in your `CertSage` data directory, which is located in the parent directory of the directory where you uploaded `certsage.php`.
-4. Press the Acquire Staging Certificate button if you want to confirm that your CertSage installation is working properly or the Acquire Production Certificate button if you are confident that your CertSage installation is working properly.
+3. Select your certificate Key Type.
+4. Enter your password into the Password box from your `password.txt` file found in your `CertSage` data directory, which is located in the parent directory of the directory where you uploaded `certsage.php`.
+5. Press the Acquire Staging Certificate button if you want to confirm that your CertSage installation is working properly or the Acquire Production Certificate button if you are confident that your CertSage installation is working properly.
 
 > [!NOTE]
-> If you pressed the Acquire Staging Certificate button in step 4, you will need to repeat the Certificate Acquisition steps with pressing the Acquire Production Certificate button in step 4.
+> If you pressed the Acquire Staging Certificate button in step 5, you will need to repeat the Certificate Acquisition steps with pressing the Acquire Production Certificate button in step 5.
 
 # Certificate Installation in cPanel
 
 1. Enter your password into the Password box from your `password.txt` file found in your `CertSage` data directory, which is located in the parent directory of the directory where you uploaded `certsage.php`.
 2. Press the Install Certificate into cPanel button.
+
+> [!NOTE]
+> The first time you use CertSage to install a certificate into cPanel, CertSage sets up a cron job for you to help automatically renew your certificate when needed. If you don't use cPanel, you'll need to install your certificate using some other method and manage your own certificate renewals.
