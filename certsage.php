@@ -14,7 +14,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 
 class CertSage
 {
-  public $version = "2.0.0";
+  public $version = "2.1.0";
   public $dataDirectory = "../CertSage";
   public $autorenew;
   public $certificateExists;
@@ -925,21 +925,35 @@ class CertSage
     $cert   = rawurlencode($certificate);
     $key    = rawurlencode($certificateKey);
 
-    $output = `uapi SSL install_ssl domain=$domain cert=$cert key=$key --output=json`;
+    unset($output);
 
-    if ($output === false)
+    $return = exec("uapi SSL install_ssl domain=$domain cert=$cert key=$key --output=json", $output, $result_code);
+
+    if ($return === false)
       throw new Exception("shell execution pipe could not be established");
 
-    if (!isset($output))
+    if (!($result_code === 0 && isset($output)))
       throw new Exception("uapi SSL install_ssl failed");
 
-    $output = `uapi SSL toggle_ssl_redirect_for_domains domains=$domain state=1 --output=json`;
+    $output = json_decode(implode("\n", $output));
 
-    if ($output === false)
+    if ($output->result->status === 0)
+      throw new Exception(empty($output->result->errors) ? "uapi SSL install_ssl error" : implode("<br>", $output->result->errors));
+
+    unset($output);
+
+    $return = exec("uapi SSL toggle_ssl_redirect_for_domains domains=$domain state=1 --output=json", $output, $result_code);
+
+    if ($return === false)
       throw new Exception("shell execution pipe could not be established");
 
-    if (!isset($output))
+    if (!($result_code === 0 && isset($output)))
       throw new Exception("uapi SSL toggle_ssl_redirect_for_domains failed");
+
+    $output = json_decode(implode("\n", $output));
+
+    if ($output->result->status === 0)
+      throw new Exception(empty($output->result->errors) ? "uapi SSL toggle_ssl_redirect_for_domains error" : implode("<br>", $output->result->errors));
 
     if (!isset($this->autorenew))
     {
@@ -947,10 +961,15 @@ class CertSage
                        "yes",
                        0644);
 
-      $output = `(crontab -l 2>/dev/null; echo "30 15 * * * curl https://$domain/certsage.php") | crontab -`;
+      unset($output);
 
-      if ($output === false)
+      $return = exec("(crontab -l 2>/dev/null; echo 30 15 \\* \\* \\* curl https://$domain/certsage.php) | crontab -", $output, $result_code);
+
+      if ($return === false)
         throw new Exception("shell execution pipe could not be established");
+
+      if ($result_code !== 0)
+        throw new Exception("failed while setting crontab");
     }
   }
 
