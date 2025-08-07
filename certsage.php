@@ -12,428 +12,311 @@ No guarantees or warranties of any kind are made as to the fitness of this softw
 Usage of this software constitutes acceptance of full liability for any consequences resulting from its usage.
 */
 
-class CertSage
+namespace CertSage;
+use Exception;
+
+$version = "3.0.0";
+$dataDirectory = "../CertSage";
+
+// *** CREATE DIRECTORY ***
+
+function createDirectory($directory)
 {
-  public $version = "2.2.0";
-  public $dataDirectory = "../CertSage";
-  public $autorenew;
-  public $certificateExists;
-  public $validFrom;
-  public $validTo;
-  public $renewAt;
-  public $shouldRenewNow;
-  public $domainNames;
-  public $keyType;
+  clearstatcache(true, $directory);
 
-  private $password;
-  private $accountKey;
-  private $accountUrl;
-  private $thumbprint;
-  private $nonce;
-  private $acmeDirectory;
-  private $responses;
+  if (is_dir($directory))
+    return;
 
-  private function createDirectory($directoryPath, $permissions)
+  if (!mkdir($directory, 0755))
+    throw new Exception("could not create directory: $directory");
+}
+
+// *** FILE EXISTS ***
+
+function fileExists($filename, $inDataDirectory = true)
+{
+  global $dataDirectory;
+
+  if ($inDataDirectory)
+    $filename = "$dataDirectory/$filename";
+
+  clearstatcache(true, $filename);
+
+  return is_file($filename);
+}
+
+// *** WRITE FILE ***
+
+function writeFile($filename, $data, $inDataDirectory = true)
+{
+  global $dataDirectory;
+
+  if ($inDataDirectory)
+    $filename = "$dataDirectory/$filename";
+
+  if (file_put_contents($filename, $data, LOCK_EX) === false)
+    throw new Exception("could not write file: $filename");
+
+  if (!chmod($filename, 0644))
+    throw new Exception("could not set permissions for file: $filename");
+}
+
+// *** READ FILE ***
+
+function readFile($filename, $inDataDirectory = true)
+{
+  global $dataDirectory;
+
+  if ($inDataDirectory)
+    $filename = "$dataDirectory/$filename";
+
+  $data = file_get_contents($filename);
+
+  if ($data === false)
+    throw new Exception("could not read file: $filename");
+
+  return $data;
+}
+
+// *** DELETE FILE ***
+
+function deleteFile($filename, $inDataDirectory = true)
+{
+  global $dataDirectory;
+
+  if ($inDataDirectory)
+    $filename = "$dataDirectory/$filename";
+
+  if (!unlink($filename))
+    throw new Exception("could not delete file: $filename");
+}
+
+// *** ENCODE JSON ***
+
+function encodeJSON($value)
+{
+  $json = json_encode($value, JSON_UNESCAPED_SLASHES);
+
+  if (json_last_error() != JSON_ERROR_NONE)
+    throw new Exception("encode JSON failed");
+
+  return $json;
+}
+
+// *** DECODE JSON ***
+
+function decodeJSON($json)
+{
+  $value = json_decode($json, true);
+
+  if (json_last_error() != JSON_ERROR_NONE)
+    throw new Exception("decode JSON failed");
+
+  return $value;
+}
+
+// *** ENCODE BASE64 ***
+
+function encodeBase64($string)
+{
+  return strtr(rtrim(base64_encode($string), "="), "+/", "-_");
+}
+
+// *** FIND HEADER ***
+
+function findHeader($response, $target, $required = true)
+{
+  $regex = "~^$target: ([^\r\n]+)[\r\n]*~i";
+  foreach ($response["headers"] as $header)
   {
-    clearstatcache(true, $directoryPath);
-
-    if (file_exists($directoryPath))
-      return;
-
-    if (!mkdir($directoryPath, $permissions))
-      throw new Exception("could not create directory: $directoryPath");
-  }
-
-  private function readFile($filePath)
-  {
-    clearstatcache(true, $filePath);
-
-    if (!file_exists($filePath))
-      return null;
-
-    $string = file_get_contents($filePath);
-
-    if ($string === false)
-      throw new Exception("could not read file: $filePath");
-
-    return $string;
-  }
-
-  private function writeFile($filePath, $string, $permissions)
-  {
-    if (file_put_contents($filePath, $string, LOCK_EX) === false)
-      throw new Exception("could not write file: $filePath");
-
-    if (!chmod($filePath, $permissions))
-      throw new Exception("could not set permissions for file: $filePath");
-  }
-
-  private function deleteFile($filePath)
-  {
-    clearstatcache(true, $filePath);
-
-    if (!file_exists($filePath))
-      return;
-
-    if (!unlink($filePath))
-      throw new Exception("could not delete file: $filePath");
-  }
-
-  private function encodeJSON($data)
-  {
-    $string = json_encode($data, JSON_UNESCAPED_SLASHES);
-
-    if (json_last_error() != JSON_ERROR_NONE)
-      throw new Exception("encode JSON failed");
-
-    return $string;
-  }
-
-  private function decodeJSON($string)
-  {
-    $data = json_decode($string, true);
-
-    if (json_last_error() != JSON_ERROR_NONE)
-      throw new Exception("decode JSON failed");
-
-    return $data;
-  }
-
-  private function encodeBase64($string)
-  {
-    return strtr(rtrim(base64_encode($string), "="), "+/", "-_");
-  }
-
-  private function decodeBase64($base64)
-  {
-    // consider strict mode to handle non-Base64 characters
-    return base64_decode(strtr($base64, "-_", "+/"));
-  }
-
-  private function findHeader($response, $target, $required = true)
-  {
-    $regex = "~^$target: ([^\r\n]+)[\r\n]*$~i";
-    foreach ($response["headers"] as $header)
-    {
-      $outcome = preg_match($regex, $header, $matches);
-
-      if ($outcome === false)
-        throw new Exception("regular expression match failed when extracting header");
-
-      if ($outcome === 1)
-        return $matches[1];
-    }
-
-    if ($required)
-      throw new Exception("missing $target header");
-
-    return null;
-  }
-
-  private function sendRequest($url, $expectedResponseCode, $payload = null, $jwk = null)
-  {
-    $headers = [];
-    $headerSize = 0;
-
-    $ch = curl_init($url);
-
-    if ($ch === false)
-      throw new Exception("cURL initialization failed");
-
-    if (!curl_setopt($ch, CURLOPT_USERAGENT, "CertSage/" . $this->version . " (support@griffin.software)"))
-      throw new Exception("cURL set user agent option failed");
-
-    if (!curl_setopt($ch, CURLOPT_RETURNTRANSFER, true))
-      throw new Exception("cURL set return transfer option failed");
-
-    if (isset($payload))
-    {
-      if (!isset($this->nonce))
-      {
-        $response = $this->sendRequest($this->acmeDirectory["newNonce"], 204);
-
-        if (!isset($this->nonce))
-          throw new Exception("get new nonce failed");
-      }
-
-      $protected = [
-        "url"   => $url,
-        "alg"   => "RS256",
-        "nonce" => $this->nonce
-      ];
-
-      if (isset($jwk))
-        $protected["jwk"] = $jwk;
-      else
-        $protected["kid"] = $this->accountUrl;
-
-      $protected = $this->encodeBase64($this->encodeJSON($protected));
-      $payload   =   $payload === ""
-                   ? ""
-                   : $this->encodeBase64($this->encodeJSON($payload));
-
-      if (openssl_sign("$protected.$payload", $signature, $this->accountKey, "sha256WithRSAEncryption") === false)
-        throw new Exception("openssl sign failed");
-
-      $signature = $this->encodeBase64($signature);
-
-      $josejson = $this->encodeJSON([
-        "protected" => $protected,
-        "payload"   => $payload,
-        "signature" => $signature
-      ]);
-
-      if (!curl_setopt($ch, CURLOPT_POSTFIELDS, $josejson))
-        throw new Exception("cURL set post fields option failed");
-
-      if (!curl_setopt($ch, CURLOPT_HTTPHEADER, ["Content-Type: application/jose+json", "Content-Length: " . strlen($josejson)]))
-        throw new Exception("cURL set http header option failed");
-    }
-
-    if (!curl_setopt($ch, CURLOPT_HEADER, true))
-      throw new Exception("cURL set header option failed");
-
-    if (!curl_setopt($ch, CURLOPT_HEADERFUNCTION,
-           function($ch, $header) use (&$headers, &$headerSize)
-           {
-             $headers[] = $header;
-             $length = strlen($header);
-             $headerSize += $length;
-             return $length;
-           }))
-      throw new Exception("cURL set header function option failed");
-
-    $body = curl_exec($ch);
-
-    if ($body === false)
-      throw new Exception("cURL execution failed: $url");
-
-    $this->responses[] = $body;
-
-    $responseCode = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-
-    if ($responseCode === false)
-      throw new Exception("cURL get response code info failed");
-
-    /*
-    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-
-    if ($headerSize === false)
-      throw new Exception("cURL get header size info failed");
-    */
-
-    $length = strlen($body);
-
-    if ($headerSize > $length)
-      throw new Exception("improper response header size");
-
-    $body =   $headerSize == $length
-            ? ""
-            : substr($body, $headerSize);
-
-    if ($body === false)
-      throw new Exception("could not truncate headers from response");
-
-    $response = [
-      "headers" => $headers,
-      "body"    => $body
-    ];
-
-    if ($responseCode !== $expectedResponseCode)
-    {
-      if ($this->findHeader($response, "content-type", false) === "application/problem+json")
-      {
-        $problem = $this->decodeJSON($response["body"]);
-
-        if (isset($problem["type"], $problem["detail"]))
-          throw new Exception($problem["type"] . "<br>" . $problem["detail"]);
-      }
-
-      throw new Exception("unexpected response code: $responseCode vs $expectedResponseCode");
-    }
-
-    $this->nonce = $this->findHeader($response, "replay-nonce", false);
-
-    return $response;
-  }
-
-  public function initialize()
-  {
-    $this->createDirectory($this->dataDirectory, 0755);
-
-    $this->autorenew = $this->readFile($this->dataDirectory . "/autorenew.txt");
-
-    $this->password = $this->readFile($this->dataDirectory . "/password.txt");
-
-    if (!isset($this->password))
-    {
-      $this->password = $this->encodeBase64(openssl_random_pseudo_bytes(15));
-
-      $this->writeFile($this->dataDirectory . "/password.txt",
-                       $this->password,
-                       0644);
-    }
-  }
-
-  public function extractCertificateInfo()
-  {
-    $certificate = $this->readFile($this->dataDirectory . "/certificate.crt");
-
-    $this->certificateExists = isset($certificate);
-
-    if (!$this->certificateExists)
-      return;
-
-    $regex = "~^(-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END CERTIFICATE-----)~";
-    $outcome = preg_match($regex, $certificate, $matches);
+    $outcome = preg_match($regex, $header, $matches);
 
     if ($outcome === false)
-      throw new Exception("extract certificate failed");
+      throw new Exception("regular expression match failed when extracting header");
 
-    if ($outcome === 0)
-      throw new Exception("certificate format mismatch");
-
-    $certificate = $matches[1];
-
-    $certificateObject = openssl_x509_read($certificate);
-
-    if ($certificateObject === false)
-      throw new Exception("check certificate failed");
-
-    $certificateData = openssl_x509_parse($certificateObject);
-
-    if ($certificateData === false)
-      throw new Exception("parse certificate failed");
-
-    // *** EXTRACT DATES ***
-
-    if (!isset($certificateData["validFrom_time_t"]))
-      throw new Exception("validFrom_time_t not found in certificate");
-
-    $validFrom = (int)$certificateData["validFrom_time_t"];
-
-    $this->validFrom = gmdate("M j, Y g:i:s A", $validFrom);
-
-    if (!isset($certificateData["validTo_time_t"]))
-      throw new Exception("validTo_time_t not found in certificate");
-
-    $validTo = (int)$certificateData["validTo_time_t"];
-
-    $this->validTo = gmdate("M j, Y g:i:s A", $validTo);
-
-    $renewAt = intdiv($validFrom + $validTo * 2, 3);
-
-    $this->renewAt = gmdate("M j, Y g:i:s A", $renewAt);
-
-    $this->shouldRenewNow = time() >= $renewAt;
-
-    // *** EXTRACT DOMAIN NAMES ***
-
-    if (!isset($certificateData["extensions"]["subjectAltName"]))
-      throw new Exception("SAN extension not found in certificate");
-
-    $sans = explode(", ", $certificateData["extensions"]["subjectAltName"]);
-
-    foreach ($sans as &$san)
-    {
-      list($type, $value) = explode(":", $san);
-
-      if ($type !== "DNS")
-        throw new Exception("Non-DNS SAN found in certificate");
-
-      $san = $value;
-    }
-
-    unset($san);
-
-    $this->domainNames = implode("\n", $sans);
-
-    // *** EXTRACT KEY TYPE ***
-
-    $certificateKeyObject = openssl_pkey_get_public($certificateObject);
-
-    if ($certificateKeyObject === false)
-      throw new Exception("check certificate key failed");
-
-    $certificateKeyDetails = openssl_pkey_get_details($certificateKeyObject);
-
-    if ($certificateKeyDetails === false)
-      throw new Exception("get certificate key details failed");
-
-    switch ($certificateKeyDetails["type"])
-    {
-      case OPENSSL_KEYTYPE_RSA:
-
-        $this->keyType = "RSA";
-
-        break;
-
-      case OPENSSL_KEYTYPE_EC:
-
-        $this->keyType = "EC";
-
-        break;
-
-      default:
-
-        throw new Exception("unsupported keyType: " . $certificateKeyDetails["type"]);
-    }
+    if ($outcome === 1)
+      return $matches[1];
   }
 
-  public function checkPassword()
+  if ($required)
+    throw new Exception("missing $target header");
+
+  return null;
+}
+
+// *** SEND REQUEST ***
+
+function sendRequest($url, $expectedResponseCode, $payload = null, $jwk = null)
+{
+  global $version;
+  global $account;
+  static $nonce = null;
+
+  $headers = [];
+  $headerSize = 0;
+
+  $ch = curl_init($url);
+
+  if ($ch === false)
+    throw new Exception("cURL initialization failed");
+
+  if (!curl_setopt($ch, CURLOPT_USERAGENT, "CertSage/" . $version . " (support@griffin.software)"))
+    throw new Exception("cURL set user agent option failed");
+
+  if (!curl_setopt($ch, CURLOPT_RETURNTRANSFER, true))
+    throw new Exception("cURL set return transfer option failed");
+
+  if (isset($payload))
   {
-    if (!isset($_POST["password"]))
-      throw new Exception("password was missing");
+    if (!isset($nonce))
+    {
+      $response = sendRequest($account["acmeDirectory"]["newNonce"], 204);
 
-    if (!is_string($_POST["password"]))
-      throw new Exception("password was not a string");
+      if (!isset($nonce))
+        throw new Exception("get new nonce failed");
+    }
 
-    if ($_POST["password"] !== $this->password)
-      throw new Exception("password was incorrect");
+    $protected = [
+      "url"   => $url,
+      "alg"   => "RS256",
+      "nonce" => $nonce
+    ];
+
+    if (isset($jwk))
+      $protected["jwk"] = $jwk;
+    else
+      $protected["kid"] = $account["URL"];
+
+    $protected = encodeBase64(encodeJSON($protected));
+
+    if ($payload !== "")
+      $payload = encodeBase64(encodeJSON($payload));
+
+    if (openssl_sign("$protected.$payload", $signature, $account["key"], "sha256WithRSAEncryption") === false)
+      throw new Exception("openssl sign failed");
+
+    $signature = encodeBase64($signature);
+
+    $josejson = encodeJSON([
+      "protected" => $protected,
+      "payload"   => $payload,
+      "signature" => $signature
+    ]);
+
+    if (!curl_setopt($ch, CURLOPT_POSTFIELDS, $josejson))
+      throw new Exception("cURL set post fields option failed");
+
+    if (!curl_setopt($ch, CURLOPT_HTTPHEADER, ["Content-Type: application/jose+json", "Content-Length: " . strlen($josejson)]))
+      throw new Exception("cURL set http header option failed");
   }
 
-  private function establishAccount()
+  if (!curl_setopt($ch, CURLOPT_HEADER, true))
+    throw new Exception("cURL set header option failed");
+
+  if (!curl_setopt($ch, CURLOPT_HEADERFUNCTION,
+         function($ch, $header) use (&$headers, &$headerSize)
+         {
+           $headers[] = $header;
+           $length = strlen($header);
+           $headerSize += $length;
+           return $length;
+         }))
+    throw new Exception("cURL set header function option failed");
+
+  $body = curl_exec($ch);
+
+  if ($body === false)
+    throw new Exception("cURL execution failed: $url");
+
+  $account["responses"][] = $body;
+
+  $responseCode = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+
+  if ($responseCode === false)
+    throw new Exception("cURL get response code info failed");
+
+  /*
+  $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+
+  if ($headerSize === false)
+    throw new Exception("cURL get header size info failed");
+  */
+
+  $length = strlen($body);
+
+  if ($headerSize > $length)
+    throw new Exception("improper response header size");
+
+  $body =   $headerSize == $length
+          ? ""
+          : substr($body, $headerSize);
+
+  if ($body === false)
+    throw new Exception("could not truncate headers from response");
+
+  $response = [
+    "headers" => $headers,
+    "body"    => $body
+  ];
+
+  if ($responseCode !== $expectedResponseCode)
+  {
+    if (findHeader($response, "content-type", false) === "application/problem+json")
+    {
+      $problem = decodeJSON($response["body"]);
+
+      if (isset($problem["type"], $problem["detail"]))
+        throw new Exception($problem["type"] . "<br>" . $problem["detail"]);
+    }
+
+    throw new Exception("unexpected response code: $responseCode vs $expectedResponseCode");
+  }
+
+  $nonce = findHeader($response, "replay-nonce", false);
+
+  return $response;
+}
+
+// *** ACQUIRE CERTIFICATE ***
+
+function acquireCertificate($environment)
+{
+  global $dataDirectory;
+  global $account;
+
+  $account = [];
+  $account["responses"] = [];
+
+  try
   {
     // *** ESTABLISH ENVIRONMENT ***
 
-    if (!isset($_POST["environment"]))
-      throw new Exception("environment was missing");
-
-    if (!is_string($_POST["environment"]))
-      throw new Exception("environment was not a string");
-
-    switch ($_POST["environment"])
+    switch ($environment)
     {
       case "production":
 
-        $fileName = "account.key";
+        $filename = "account.key";
         $url = "https://acme-v02.api.letsencrypt.org/directory";
-
         break;
 
       case "staging":
 
-        $fileName = "account-staging.key";
+        $filename = "account-staging.key";
         $url = "https://acme-staging-v02.api.letsencrypt.org/directory";
-
         break;
-
-      default:
-
-        throw new Exception("unknown environment: " . $_POST["environment"]);
     }
 
-    // *** READ ACCOUNT KEY ***
-
-    $this->accountKey = $this->readFile($this->dataDirectory . "/$fileName");
-
-    $accountKeyExists = isset($this->accountKey);
+    $accountKeyExists = fileExists($filename);
 
     if ($accountKeyExists)
     {
+      // *** READ ACCOUNT KEY ***
+
+      $account["key"] = readFile($filename);
+
       // *** CHECK ACCOUNT KEY ***
 
-      $accountKeyObject = openssl_pkey_get_private($this->accountKey);
+      $accountKeyObject = openssl_pkey_get_private($account["key"]);
 
       if ($accountKeyObject === false)
         throw new Exception("check account key failed");
@@ -452,7 +335,7 @@ class CertSage
       if ($accountKeyObject === false)
         throw new Exception("generate account key failed");
 
-      if (!openssl_pkey_export($accountKeyObject, $this->accountKey))
+      if (!openssl_pkey_export($accountKeyObject, $account["key"]))
         throw new Exception("export account key failed");
     }
 
@@ -466,511 +349,536 @@ class CertSage
     // *** CONSTRUCT JWK ***
 
     $jwk = [
-      "e" => $this->encodeBase64($accountKeyDetails["rsa"]["e"]), // public exponent
+      "e" => encodeBase64($accountKeyDetails["rsa"]["e"]), // public exponent
       "kty" => "RSA",
-      "n" => $this->encodeBase64($accountKeyDetails["rsa"]["n"])  // modulus
+      "n" => encodeBase64($accountKeyDetails["rsa"]["n"])  // modulus
     ];
 
     // *** CALCULATE THUMBPRINT ***
 
-    $digest = openssl_digest($this->encodeJSON($jwk), "sha256", true);
+    $digest = openssl_digest(encodeJSON($jwk), "sha256", true);
 
     if ($digest === false)
       throw new Exception("digest JWK failed");
 
-    $this->thumbprint = $this->encodeBase64($digest);
+    $thumbprint = encodeBase64($digest);
 
     // *** GET ACME DIRECTORY ***
 
-    $response = $this->sendRequest($url, 200);
+    $response = sendRequest($url, 200);
 
-    $this->acmeDirectory = $this->decodeJSON($response["body"]);
+    $account["acmeDirectory"] = decodeJSON($response["body"]);
 
     if ($accountKeyExists)
     {
       // *** LOOKUP ACCOUNT ***
 
-      $url = $this->acmeDirectory["newAccount"];
+      $url = $account["acmeDirectory"]["newAccount"];
 
       $payload = [
         "onlyReturnExisting" => true
       ];
 
-      $response = $this->sendRequest($url, 200, $payload, $jwk);
+      $response = sendRequest($url, 200, $payload, $jwk);
     }
     else
     {
       // *** REGISTER ACCOUNT ***
 
-      $url = $this->acmeDirectory["newAccount"];
+      $url = $account["acmeDirectory"]["newAccount"];
 
       $payload = [
         "termsOfServiceAgreed" => true
       ];
 
-      $response = $this->sendRequest($url, 201, $payload, $jwk);
+      $response = sendRequest($url, 201, $payload, $jwk);
 
       // *** WRITE ACCOUNT KEY ***
 
-      $this->writeFile($this->dataDirectory . "/$fileName",
-                       $this->accountKey,
-                       0644);
+      writeFile($filename, $account["key"]);
     }
 
-    $this->accountUrl = $this->findHeader($response, "location");
-  }
+    $account["URL"] = findHeader($response, "location");
 
-  private function dumpResponses()
-  {
-    $this->writeFile($this->dataDirectory . "/responses.txt",
-                     implode("\n\n-----\n\n", array_reverse($this->responses)),
-                     0644);
-  }
+    // *** CREATE NEW ORDER ***
 
-  public function acquireCertificate()
-  {
-    $this->responses = [];
+    if (!isset($_POST["identifiers"]))
+      throw new Exception("identifiers was missing");
+
+    if (!is_string($_POST["identifiers"]))
+      throw new Exception("identifiers was not a string");
+
+    $identifiers = [];
+
+    for ($identifier = strtok($_POST["identifiers"], "\r\n");
+         $identifier !== false;
+         $identifier = strtok("\r\n"))
+      $identifiers[] = [
+        "type"  => "dns",
+        "value" => $identifier
+      ];
+
+    $url = $account["acmeDirectory"]["newOrder"];
+
+    $payload = [
+      "identifiers" => $identifiers
+    ];
+
+    $response = sendRequest($url, 201, $payload);
+
+    $orderurl = findHeader($response, "location");
+    $order = decodeJSON($response["body"]);
+
+    // *** GET CHALLENGES ***
+
+    $authorizationurls = [];
+    $challengeurls = [];
+    $challengetokens = [];
+
+    $payload = ""; // empty
+
+    foreach ($order["authorizations"] as $url)
+    {
+      $response = sendRequest($url, 200, $payload);
+
+      $authorization = decodeJSON($response["body"]);
+
+      if ($authorization["status"] === "valid")
+        continue;
+
+      $authorizationurls[] = $url;
+
+      foreach ($authorization["challenges"] as $challenge)
+      {
+        if ($challenge["type"] === "http-01")
+        {
+          $challengeurls[] = $challenge["url"];
+          $challengetokens[] = $challenge["token"];
+          continue 2;
+        }
+      }
+
+      throw new Exception("no http-01 challenge found");
+    }
+
+    // *** CREATE HTTP-01 CHALLENGE DIRECTORIES ***
+
+    createDirectory("./.well-known");
+    createDirectory("./.well-known/acme-challenge");
 
     try
     {
-      $this->establishAccount();
+      // *** WRITE HTTP-01 CHALLENGE FILES ***
 
-      // *** CREATE NEW ORDER ***
+      foreach ($challengetokens as $challengetoken)
+        writeFile("./.well-known/acme-challenge/$challengetoken",
+                  "$challengetoken.$thumbprint",
+                  false);
 
-      if (!isset($_POST["domainNames"]))
-        throw new Exception("domainNames was missing");
+      // delay for creation of challenge files
+      sleep(2);
 
-      if (!is_string($_POST["domainNames"]))
-        throw new Exception("domainNames was not a string");
+      // *** CONFIRM CHALLENGES ***
 
-      $identifiers = [];
+      $payload = (object)[]; // empty object
 
-      for ($domainName = strtok($_POST["domainNames"], "\r\n");
-           $domainName !== false;
-           $domainName = strtok("\r\n"))
-        $identifiers[] = [
-          "type"  => "dns",
-          "value" => $domainName
-        ];
+      foreach ($challengeurls as $url)
+        $challenge = sendRequest($url, 200, $payload);
 
-      $url = $this->acmeDirectory["newOrder"];
+      // delay for processing of challenges
+      sleep(6);
 
-      $payload = [
-        "identifiers" => $identifiers
-      ];
-
-      $response = $this->sendRequest($url, 201, $payload);
-
-      $orderurl = $this->findHeader($response, "location");
-      $order = $this->decodeJSON($response["body"]);
-
-      // *** GET CHALLENGES ***
-
-      $authorizationurls = [];
-      $challengeurls = [];
-      $challengetokens = [];
+      // *** CHECK AUTHORIZATIONS ***
 
       $payload = ""; // empty
 
-      foreach ($order["authorizations"] as $url)
+      foreach ($authorizationurls as $url)
       {
-        $response = $this->sendRequest($url, 200, $payload);
-
-        $authorization = $this->decodeJSON($response["body"]);
-
-        if ($authorization["status"] === "valid")
-          continue;
-
-        $authorizationurls[] = $url;
-
-        foreach ($authorization["challenges"] as $challenge)
-        {
-          if ($challenge["type"] === "http-01")
-          {
-            $challengeurls[] = $challenge["url"];
-            $challengetokens[] = $challenge["token"];
-            continue 2;
-          }
-        }
-
-        throw new Exception("no http-01 challenge found");
-      }
-
-      // *** CREATE HTTP-01 CHALLENGE DIRECTORIES ***
-
-      $this->createDirectory("./.well-known", 0755);
-      $this->createDirectory("./.well-known/acme-challenge", 0755);
-
-      try
-      {
-        // *** WRITE HTTP-01 CHALLENGE FILES ***
-
-        foreach ($challengetokens as $challengetoken)
-          $this->writeFile("./.well-known/acme-challenge/$challengetoken",
-                           "$challengetoken." . $this->thumbprint,
-                           0644);
-
-        // delay for creation of challenge files
-        sleep(2);
-
-        // *** CONFIRM CHALLENGES ***
-
-        $payload = (object)[]; // empty object
-
-        foreach ($challengeurls as $url)
-          $challenge = $this->sendRequest($url, 200, $payload);
-
-        // delay for processing of challenges
-        sleep(6);
-
-        // *** CHECK AUTHORIZATIONS ***
-
-        $payload = ""; // empty
-
-        foreach ($authorizationurls as $url)
-        {
-          for ($attempt = 1; true; ++$attempt)
-          {
-            $response = $this->sendRequest($url, 200, $payload);
-
-            $authorization = $this->decodeJSON($response["body"]);
-
-            if ($authorization["status"] !== "pending")
-              break;
-
-            if ($attempt == 10)
-              throw new Exception("authorization still pending after $attempt attempts");
-
-            // linear backoff
-            sleep(2);
-          }
-
-          if ($authorization["status"] !== "valid")
-            throw new Exception($authorization["challenges"][0]["error"]["type"] . "<br>" . $authorization["challenges"][0]["error"]["detail"]);
-        }
-      }
-      finally
-      {
-        // *** DELETE HTTP-01 CHALLENGE FILES ***
-
-        foreach ($challengetokens as $challengetoken)
-          $this->deleteFile("./.well-known/acme-challenge/$challengetoken");
-      }
-
-      // *** GENERATE CERTIFICATE KEY ***
-
-      switch ($_POST["keyType"])
-      {
-        case "RSA":
-  
-          $options = [
-            "private_key_bits" => 2048,
-            "private_key_type" => OPENSSL_KEYTYPE_RSA
-          ];
-  
-          break;
-  
-        case "EC":
-  
-          $options = [
-            "curve_name" => "secp384r1",
-            "private_key_type" => OPENSSL_KEYTYPE_EC
-          ];
-  
-          break;
-  
-        default:
-  
-          throw new Exception("unknown keyType: " . $_POST["keyType"]);
-      }
-
-      $certificateKeyObject = openssl_pkey_new($options);
-
-      if ($certificateKeyObject === false)
-        throw new Exception("generate certificate key failed");
-
-      if (!openssl_pkey_export($certificateKeyObject, $certificateKey))
-        throw new Exception("export certificate key failed");
-
-      // *** GENERATE CSR ***
-
-      $dn = [
-        "commonName" => $identifiers[0]["value"]
-      ];
-
-      $options = [
-        "digest_alg" => "sha256",
-        "config" => $this->dataDirectory . "/openssl.cnf"
-      ];
-
-      $opensslcnf =
-        "[req]\n" .
-        "distinguished_name = req_distinguished_name\n" .
-        "req_extensions = v3_req\n\n" .
-        "[req_distinguished_name]\n\n" .
-        "[v3_req]\n" .
-        "subjectAltName = @san\n\n" .
-        "[san]\n";
-
-      $i = 0;
-      foreach ($identifiers as $identifier)
-      {
-        ++$i;
-        $opensslcnf .= "DNS.$i = " . $identifier["value"] . "\n";
-      }
-
-      try
-      {
-        $this->writeFile($this->dataDirectory . "/openssl.cnf",
-                         $opensslcnf,
-                         0644);
-
-        $csrObject = openssl_csr_new($dn, $certificateKey, $options);
-
-        if ($csrObject === false)
-          throw new Exception("generate csr failed");
-      }
-      finally
-      {
-        $this->deleteFile($this->dataDirectory . "/openssl.cnf");
-      }
-
-      if (!openssl_csr_export($csrObject, $csr))
-        throw new Exception("export csr failed");
-
-      // *** FINALIZE ORDER ***
-
-      $url = $order["finalize"];
-
-      $regex = "~^-----BEGIN CERTIFICATE REQUEST-----([A-Za-z0-9+/]+)=?=?-----END CERTIFICATE REQUEST-----$~";
-      $outcome = preg_match($regex, str_replace("\n", "", $csr), $matches);
-
-      if ($outcome === false)
-        throw new Exception("extract csr failed");
-
-      if ($outcome === 0)
-        throw new Exception("csr format mismatch");
-
-      $payload = [
-        "csr" => strtr($matches[1], "+/", "-_")
-      ];
-
-      $response = $this->sendRequest($url, 200, $payload);
-
-      $order = $this->decodeJSON($response["body"]);
-
-      if ($order["status"] !== "valid")
-      {
-        // delay for finalizing order
-        sleep(2);
-
-        // *** CHECK ORDER ***
-
-        $url = $orderurl;
-
-        $payload = ""; // empty
-
         for ($attempt = 1; true; ++$attempt)
         {
-          $response = $this->sendRequest($url, 200, $payload);
+          $response = sendRequest($url, 200, $payload);
 
-          $order = $this->decodeJSON($response["body"]);
+          $authorization = decodeJSON($response["body"]);
 
-          if (!(   $order["status"] === "pending"
-                || $order["status"] === "processing"
-                || $order["status"] === "ready"))
+          if ($authorization["status"] !== "pending")
             break;
 
           if ($attempt == 10)
-            throw new Exception("order still pending after $attempt attempts");
+            throw new Exception("authorization still pending after $attempt attempts");
 
           // linear backoff
           sleep(2);
         }
 
-        if ($order["status"] !== "valid")
-          throw new Exception("order failed");
-      }
-
-      // *** DOWNLOAD CERTIFICATE ***
-
-      $url = $order["certificate"];
-
-      $payload = ""; // empty
-
-      $response = $this->sendRequest($url, 200, $payload);
-
-      $certificate = $response["body"];
-
-      if ($_POST["environment"] == "production")
-      {
-        // *** WRITE CERTIFICATE AND CERTIFICATE KEY ***
-
-        $this->writeFile($this->dataDirectory . "/certificate.crt",
-                         $certificate,
-                         0644);
-
-        $this->writeFile($this->dataDirectory . "/certificate.key",
-                         $certificateKey,
-                         0644);
+        if ($authorization["status"] !== "valid")
+          throw new Exception($authorization["challenges"][0]["error"]["type"] . "<br>" . $authorization["challenges"][0]["error"]["detail"]);
       }
     }
     finally
     {
-      $this->dumpResponses();
+      // *** DELETE HTTP-01 CHALLENGE FILES ***
+
+      foreach ($challengetokens as $challengetoken)
+        deleteFile("./.well-known/acme-challenge/$challengetoken", false);
     }
-  }
 
-  public function installCertificate()
-  {
-    // *** READ CERTIFICATE ***
+    // *** GENERATE CERTIFICATE KEY ***
 
-    $certificate = $this->readFile($this->dataDirectory . "/certificate.crt");
+    switch ($_POST["keyType"])
+    {
+      case "RSA":
 
-    if (!isset($certificate))
-      throw new Exception("certificate file does not exist");
+        $options = [
+          "private_key_bits" => 2048,
+          "private_key_type" => OPENSSL_KEYTYPE_RSA
+        ];
+        break;
 
-    // *** EXTRACT CERTIFICATE ***
+      case "EC":
 
-    $regex = "~^(-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END CERTIFICATE-----)~";
-    $outcome = preg_match($regex, $certificate, $matches);
+        $options = [
+          "curve_name" => "secp384r1",
+          "private_key_type" => OPENSSL_KEYTYPE_EC
+        ];
+        break;
 
-    if ($outcome === false)
-      throw new Exception("extract certificate failed");
+      default:
 
-    if ($outcome === 0)
-      throw new Exception("certificate format mismatch");
+        throw new Exception("unknown keyType: " . $_POST["keyType"]);
+    }
 
-    $certificate = $matches[1];
-
-    // *** CHECK CERTIFICATE ***
-
-    $certificateObject = openssl_x509_read($certificate);
-
-    if ($certificateObject === false)
-      throw new Exception("check certificate failed");
-
-    // *** READ CERTIFICATE KEY ***
-
-    $certificateKey = $this->readFile($this->dataDirectory . "/certificate.key");
-
-    if (!isset($certificateKey))
-      throw new Exception("certificate key file does not exist");
-
-    // *** EXTRACT CERTIFICATE KEY ***
-
-    $regex = "~^(-----BEGIN PRIVATE KEY-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END PRIVATE KEY-----)~";
-    $outcome = preg_match($regex, $certificateKey, $matches);
-
-    if ($outcome === false)
-      throw new Exception("extract certificate key failed");
-
-    if ($outcome === 0)
-      throw new Exception("certificate key format mismatch");
-
-    $certificateKey = $matches[1];
-
-    // *** CHECK CERTIFICATE KEY ***
-
-    $certificateKeyObject = openssl_pkey_get_private($certificateKey);
+    $certificateKeyObject = openssl_pkey_new($options);
 
     if ($certificateKeyObject === false)
-      throw new Exception("check certificate key failed");
+      throw new Exception("generate certificate key failed");
 
-    // *** VERIFY CERTIFICATE AND CERTIFICATE KEY CORRESPOND ***
+    if (!openssl_pkey_export($certificateKeyObject, $certificateKey))
+      throw new Exception("export certificate key failed");
 
-    if (!openssl_x509_check_private_key($certificateObject, $certificateKeyObject))
-      throw new Exception("certificate and certificate key do not correspond");
+    // *** GENERATE CSR ***
 
-    // *** EXTRACT DOMAIN NAMES ***
+    $dn = [
+      "commonName" => $identifiers[0]["value"]
+    ];
 
-    $certificateData = openssl_x509_parse($certificateObject);
+    $options = [
+      "digest_alg" => "sha256",
+      "config" => "$dataDirectory/openssl.cnf"
+    ];
 
-    if ($certificateData === false)
-      throw new Exception("parse certificate failed");
+    $opensslcnf =
+      "[req]\n" .
+      "distinguished_name = req_distinguished_name\n" .
+      "req_extensions = v3_req\n\n" .
+      "[req_distinguished_name]\n\n" .
+      "[v3_req]\n" .
+      "subjectAltName = @san\n\n" .
+      "[san]\n";
 
-    if (!isset($certificateData["extensions"]["subjectAltName"]))
-      throw new Exception("No SANs found in certificate");
-
-    $sans = explode(", ", $certificateData["extensions"]["subjectAltName"]);
-
-    foreach ($sans as &$san)
+    $i = 0;
+    foreach ($identifiers as $identifier)
     {
-      list($type, $value) = explode(":", $san);
-
-      if ($type !== "DNS")
-        throw new Exception("Non-DNS SAN found in certificate");
-
-      $san = $value;
+      ++$i;
+      $opensslcnf .= "DNS.$i = " . $identifier["value"] . "\n";
     }
 
-    unset($san);
-
-    // *** INSTALL CERTIFICATE ***
-
-    $domain = $sans[0];
-    $domainLength = strlen($sans[0]);
-
-    foreach ($sans as $san)
+    try
     {
-      $sanLength = strlen($san);
+      writeFile("openssl.cnf", $opensslcnf);
 
-      if ($domainLength <= $sanLength)
-        continue;
+      $csrObject = openssl_csr_new($dn, $certificateKey, $options);
 
-      $domain = $san;
-      $domainLength = $sanLength;
+      if ($csrObject === false)
+        throw new Exception("generate csr failed");
+    }
+    finally
+    {
+      deleteFile("openssl.cnf");
     }
 
-    $cert   = rawurlencode($certificate);
-    $key    = rawurlencode($certificateKey);
+    if (!openssl_csr_export($csrObject, $csr))
+      throw new Exception("export csr failed");
 
+    // *** FINALIZE ORDER ***
+
+    $url = $order["finalize"];
+
+    $outcome = preg_match("~^-----BEGIN CERTIFICATE REQUEST-----([^\-]+)-----END CERTIFICATE REQUEST-----~",
+                          str_replace("\n", "", $csr),
+                          $matches);
+
+    if ($outcome === false)
+      throw new Exception("extract csr failed");
+
+    if ($outcome === 0)
+      throw new Exception("csr format mismatch");
+
+    $payload = [
+      "csr" => strtr(rtrim($matches[1], "="), "+/", "-_")
+    ];
+
+    $response = sendRequest($url, 200, $payload);
+
+    $order = decodeJSON($response["body"]);
+
+    if ($order["status"] !== "valid")
+    {
+      // delay for finalizing order
+      sleep(2);
+
+      // *** CHECK ORDER ***
+
+      $url = $orderurl;
+
+      $payload = ""; // empty
+
+      for ($attempt = 1; true; ++$attempt)
+      {
+        $response = sendRequest($url, 200, $payload);
+
+        $order = decodeJSON($response["body"]);
+
+        if (!(   $order["status"] === "pending"
+              || $order["status"] === "processing"
+              || $order["status"] === "ready"))
+          break;
+
+        if ($attempt == 10)
+          throw new Exception("order still pending after $attempt attempts");
+
+        // linear backoff
+        sleep(2);
+      }
+
+      if ($order["status"] !== "valid")
+        throw new Exception("order failed");
+    }
+
+    // *** DOWNLOAD CERTIFICATE ***
+
+    $url = $order["certificate"];
+
+    $payload = ""; // empty
+
+    $response = sendRequest($url, 200, $payload);
+
+    $certificate = $response["body"];
+
+    if ($environment === "production")
+    {
+      // *** WRITE CERTIFICATE AND CERTIFICATE KEY ***
+
+      writeFile("certificate.crt", $certificate);
+      writeFile("certificate.key", $certificateKey);
+    }
+  }
+  finally
+  {
+    writeFile("responses.txt",
+              implode("\n\n-----\n\n", array_reverse($account["responses"])));
+  }
+}
+
+// *** IMPORT CERTIFICATE ***
+
+function importCertificate()
+{
+  global $certificate;
+
+  $certificate = [];
+  $certificate["valid"] = false;
+
+  // *** EXTRACT CERTIFICATE AND KEY ***
+
+  $certificateMissing    = !fileExists("certificate.crt");
+  $certificateKeyMissing = !fileExists("certificate.key");
+
+  if ($certificateMissing && $certificateKeyMissing)
+    return;
+
+  if ($certificateMissing)
+    throw new Exception("certificate.crt file missing");
+
+  if ($certificateKeyMissing)
+    throw new Exception("certificate.key file missing");
+
+  $outcome = preg_match("~^(-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END CERTIFICATE-----)~",
+                        readFile("certificate.crt"),
+                        $matches);
+
+  if ($outcome === false)
+    throw new Exception("extract certificate failed");
+
+  if ($outcome === 0)
+    throw new Exception("certificate format mismatch");
+
+  $certificate["certificate"] = $matches[1];
+
+  $outcome = preg_match("~^(-----BEGIN PRIVATE KEY-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END PRIVATE KEY-----)~",
+                        readFile("certificate.key"),
+                        $matches);
+
+  if ($outcome === false)
+    throw new Exception("extract certificate key failed");
+
+  if ($outcome === 0)
+    throw new Exception("certificate key format mismatch");
+
+  $certificate["key"] = $matches[1];
+
+  // *** CHECK CERTIFICATE AND KEY ***
+
+  $certificateObject = openssl_x509_read($certificate["certificate"]);
+
+  if ($certificateObject === false)
+    throw new Exception("check certificate failed");
+
+  $certificateKeyObject = openssl_pkey_get_private($certificate["key"]);
+
+  if ($certificateKeyObject === false)
+    throw new Exception("check certificate key failed");
+
+  if (!openssl_x509_check_private_key($certificateObject, $certificateKeyObject))
+    throw new Exception("certificate and certificate key do not correspond");
+
+  // *** PARSE CERTIFICATE ***
+
+  $certificateData = openssl_x509_parse($certificateObject);
+
+  if ($certificateData === false)
+    throw new Exception("parse certificate failed");
+
+  // *** EXTRACT TIMES ***
+
+  $time = time();
+  $certificate["validFrom"] = (int)$certificateData["validFrom_time_t"];
+  $certificate["validTo"]   = (int)$certificateData["validTo_time_t"];
+  $certificate["renewAt"]   = intdiv($certificate["validFrom"] + $certificate["validTo"] * 2, 3);
+  $certificate["renewNow"]  = $time >= $certificate["renewAt"];
+  $certificate["expired"]   = $time >= $certificate["validTo"];
+
+  // *** EXTRACT DOMAIN NAMES ***
+
+  $sans = explode(", ", $certificateData["extensions"]["subjectAltName"]);
+
+  foreach ($sans as &$san)
+  {
+    list($type, $value) = explode(":", $san);
+
+    if ($type !== "DNS")
+      throw new Exception("Non-DNS SAN found in certificate");
+
+    $san = $value;
+  }
+
+  unset($san);
+
+  $certificate["identifiers"] = $sans;
+
+  // *** EXTRACT KEY TYPE ***
+
+  $certificateKeyObject = openssl_pkey_get_public($certificateObject);
+
+  if ($certificateKeyObject === false)
+    throw new Exception("check certificate key failed");
+
+  $certificateKeyDetails = openssl_pkey_get_details($certificateKeyObject);
+
+  if ($certificateKeyDetails === false)
+    throw new Exception("get certificate key details failed");
+
+  switch ($certificateKeyDetails["type"])
+  {
+    case OPENSSL_KEYTYPE_RSA:
+
+      $certificate["keyType"] = "RSA";
+      break;
+
+    case OPENSSL_KEYTYPE_EC:
+
+      $certificate["keyType"] = "EC";
+      break;
+
+    default:
+
+      throw new Exception("unsupported keyType: " . $certificateKeyDetails["type"]);
+  }
+
+  $certificate["valid"] = true;
+}
+
+// *** INSTALL CERTIFICATE ***
+
+function installCertificate()
+{
+  global $certificate;
+
+  // *** INSTALL CERTIFICATE INTO CPANEL ***
+
+  $domain = $certificate["identifiers"][0];
+  $domainLength = strlen($certificate["identifiers"][0]);
+
+  foreach ($certificate["identifiers"] as $san)
+  {
+    $sanLength = strlen($san);
+
+    if ($sanLength >= $domainLength)
+      continue;
+
+    $domain = $san;
+    $domainLength = $sanLength;
+  }
+
+  $cert = rawurlencode($certificate["certificate"]);
+  $key  = rawurlencode($certificate["key"]);
+
+  unset($output);
+
+  $return = exec("uapi SSL install_ssl domain=$domain cert=$cert key=$key --output=json", $output, $result_code);
+
+  if ($return === false)
+    throw new Exception("shell execution pipe could not be established");
+
+  if ($result_code !== 0)
+    throw new Exception("uapi SSL install_ssl failed");
+
+  $output = json_decode(implode("\n", $output));
+
+  if ($output->result->status === 0)
+    throw new Exception(empty($output->result->errors) ? "uapi SSL install_ssl error" : implode("<br>", $output->result->errors));
+
+  // *** ENABLE HTTP->HTTPS REDIRECT ***
+
+  unset($output);
+
+  $return = exec("uapi SSL toggle_ssl_redirect_for_domains domains=$domain state=1 --output=json", $output, $result_code);
+
+  if ($return === false)
+    throw new Exception("shell execution pipe could not be established");
+
+  if ($result_code !== 0)
+    throw new Exception("uapi SSL toggle_ssl_redirect_for_domains failed");
+
+  $output = json_decode(implode("\n", $output));
+
+  if ($output->result->status === 0)
+    throw new Exception(empty($output->result->errors) ? "uapi SSL toggle_ssl_redirect_for_domains error" : implode("<br>", $output->result->errors));
+
+  // *** SETUP AUTORENEWAL ***
+
+  if (!fileExists("autorenew.txt"))
+  {
     unset($output);
 
-    $return = exec("uapi SSL install_ssl domain=$domain cert=$cert key=$key --output=json", $output, $result_code);
+    $return = exec("(crontab -l 2>/dev/null; echo 30 15 \\* \\* \\* curl https://$domain/certsage.php) | crontab -", $output, $result_code);
 
     if ($return === false)
       throw new Exception("shell execution pipe could not be established");
 
-    if (!($result_code === 0 && isset($output)))
-      throw new Exception("uapi SSL install_ssl failed");
+    if ($result_code !== 0)
+      throw new Exception("failed while setting crontab");
 
-    $output = json_decode(implode("\n", $output));
-
-    if ($output->result->status === 0)
-      throw new Exception(empty($output->result->errors) ? "uapi SSL install_ssl error" : implode("<br>", $output->result->errors));
-
-    unset($output);
-
-    $return = exec("uapi SSL toggle_ssl_redirect_for_domains domains=$domain state=1 --output=json", $output, $result_code);
-
-    if ($return === false)
-      throw new Exception("shell execution pipe could not be established");
-
-    if (!($result_code === 0 && isset($output)))
-      throw new Exception("uapi SSL toggle_ssl_redirect_for_domains failed");
-
-    $output = json_decode(implode("\n", $output));
-
-    if ($output->result->status === 0)
-      throw new Exception(empty($output->result->errors) ? "uapi SSL toggle_ssl_redirect_for_domains error" : implode("<br>", $output->result->errors));
-
-    if (!isset($this->autorenew))
-    {
-      $this->writeFile($this->dataDirectory . "/autorenew.txt",
-                       "yes",
-                       0644);
-
-      unset($output);
-
-      $return = exec("(crontab -l 2>/dev/null; echo 30 15 \\* \\* \\* curl https://$domain/certsage.php) | crontab -", $output, $result_code);
-
-      if ($return === false)
-        throw new Exception("shell execution pipe could not be established");
-
-      if ($result_code !== 0)
-        throw new Exception("failed while setting crontab");
-    }
+    writeFile("autorenew.txt", "yes");
   }
 }
 
@@ -978,48 +886,60 @@ class CertSage
 
 try
 {
-  $certsage = new CertSage();
-
-  $certsage->initialize();
-
-  if (!isset($_POST["action"]))
-  {
-    $page = "welcome";
-
-    $certsage->extractCertificateInfo();
-
-    if (   isset($certsage->autorenew)
-        && $certsage->autorenew === "yes"
-        && $certsage->certificateExists
-        && $certsage->shouldRenewNow)
-    {
-      $_POST["domainNames"] = $certsage->domainNames;
-      $_POST["keyType"] = $certsage->keyType;
-      $_POST["environment"] = "production";
-      $certsage->acquireCertificate();
-      $certsage->installCertificate();
-    }
-  }
-  elseif (!is_string($_POST["action"]))
-    throw new Exception("action was not a string");
-  else
+  if (isset($_POST["action"]))
   {
     $page = "success";
 
-    $certsage->checkpassword();
+    // *** INITIALIZE ***
+
+    importCertificate();
+
+    // *** CHECK PASSWORD ***
+
+    if (!isset($_POST["password"]))
+      throw new Exception("password was missing");
+
+    if (!is_string($_POST["password"]))
+      throw new Exception("password was not a string");
+
+    if (!fileExists("password.txt"))
+      throw new Exception("password.txt file missing");
+
+    if ($_POST["password"] !== readFile("password.txt"))
+      throw new Exception("password was incorrect");
+
+    // *** PROCESS ACTION ***
+
+    if (!is_string($_POST["action"]))
+      throw new Exception("action was not a string");
 
     switch ($_POST["action"])
     {
-      case "acquirecertificate":
+      case "acquireandinstall":
 
-        $certsage->acquireCertificate();
-
+        acquireCertificate("production");
+        importCertificate();
+        installCertificate();
+        $message = "Certificate acquired and installed into cPanel.";
         break;
 
-      case "installcertificate":
+      case "acquire":
 
-        $certsage->installCertificate();
+        acquireCertificate("production");
+        importCertificate();
+        $message = "Certificate acquired.";
+        break;
 
+      case "install":
+
+        installCertificate();
+        $message = "Certificate installed into cPanel.";
+        break;
+
+      case "test":
+
+        acquireCertificate("staging");
+        $message = "Test passed.";
         break;
 
       default:
@@ -1027,12 +947,38 @@ try
         throw new Exception("unknown action: " . $_POST["action"]);
     }
   }
+  else
+  {
+    $page = "welcome";
+
+    // *** INITIALIZE ***
+
+    createDirectory($dataDirectory);
+
+    if (!fileExists("password.txt"))
+      writeFile("password.txt", encodeBase64(openssl_random_pseudo_bytes(15)));
+
+    importCertificate();
+
+    // *** PROCESS RENEWAL ***
+
+    if (   $certificate["valid"]
+        && $certificate["renewNow"]
+        && fileExists("autorenew.txt")
+        && readFile("autorenew.txt") === "yes")
+    {
+      $_POST["identifiers"] = implode("\n", $certificate["identifiers"]);
+      $_POST["keyType"]     = $certificate["keyType"];
+      acquireCertificate("production");
+      importCertificate();
+      installCertificate();
+    }
+  }
 }
 catch (Exception $e)
 {
   $page = "trouble";
-
-  $error = $e->getMessage();
+  $message = $e->getMessage();
 }
 ?>
 <!DOCTYPE html>
@@ -1082,7 +1028,7 @@ header, main
   background: rgba(255,255,255,0.80);
 }
 
-main, form, p, footer
+main, p, footer
 {
   margin-top: 1.5rem;
 }
@@ -1110,12 +1056,6 @@ h1
 form
 {
   text-align: center;
-}
-
-h2
-{
-  font-size: 1.5rem;
-  line-height: 2rem;
 }
 
 textarea, input
@@ -1216,146 +1156,86 @@ footer a
 <header>
 <ul>
 <li>&#x1F9D9;&#x1F3FC;&#x200D;&#x2642;&#xFE0F; CertSage</li>
-<li>version <?= $certsage->version ?></li>
-<li><a href="https://community.letsencrypt.org/t/certsage-acme-client-version-2-0-0-easy-webpage-interface-optimized-for-cpanel-no-commands-to-type-root-not-required-fully-automated-certificate-renewals/233218" target="_blank">official download and help page</a></li>
+<li>version <?= $version ?></li>
 <li>support@griffin.software</li>
 </ul>
 </header>
 
 <main>
 <?php
-  switch ($page):
-    case "welcome":
+switch ($page):
+  case "welcome":
 ?>
 <h1>Welcome!</h1>
 
-<p>CertSage is an <a href="https://tools.ietf.org/html/rfc8555" target="_blank">ACME</a> client that acquires free <a href="https://en.m.wikipedia.org/wiki/Domain-validated_certificate" target="_blank">DV TLS/SSL certificates</a> from <a href="https://letsencrypt.org/about/" target="_blank">Let's Encrypt</a> by satisfying an <a href="https://letsencrypt.org/docs/challenge-types/#http-01-challenge" target="_blank">HTTP-01 challenge</a> for each <a href="https://en.m.wikipedia.org/wiki/Domain_name" target="_blank">domain name</a> to be covered by a certificate. By using CertSage, you are agreeing to the <a href="https://letsencrypt.org/repository/#let-s-encrypt-subscriber-agreement" target="_blank">Let's Encrypt Subscriber Agreement</a>. Please use the <a href="https://letsencrypt.org/docs/staging-environment/" target="_blank">staging environment</a> for testing to avoid hitting <a href="https://letsencrypt.org/docs/rate-limits/" target="_blank">rate limits</a>.</p>
+<p>CertSage is an <a href="https://tools.ietf.org/html/rfc8555" target="_blank">ACME</a> client that acquires free <a href="https://en.m.wikipedia.org/wiki/Domain-validated_certificate" target="_blank">DV TLS/SSL certificates</a> from <a href="https://letsencrypt.org/about/" target="_blank">Let's Encrypt</a> by satisfying an <a href="https://letsencrypt.org/docs/challenge-types/#http-01-challenge" target="_blank">HTTP-01 challenge</a> for each <a href="https://en.m.wikipedia.org/wiki/Domain_name" target="_blank">domain name</a> to be covered by a certificate.</p>
+
+<p>By using CertSage, you are agreeing to the <a href="https://letsencrypt.org/repository/#let-s-encrypt-subscriber-agreement" target="_blank">Let's Encrypt Subscriber Agreement</a>.</p>
+<?php
+    break;
+  case "success":
+?>
+<h1>Success!</h1>
+
+<p><?= $message ?></p>
+
+<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
+<?php
+    break;
+  case "trouble":
+?>
+<h1>Trouble...</h1>
+
+<p><?= $message ?></p>
+
+<p>If you need help resolving this issue, please post a help topic in the <a href="https://community.letsencrypt.org/" target="_blank">Let's Encrypt Community</a>.</p>
+<?php
+    break;
+endswitch;
+?>
 
 <form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
-<h2>Acquire Certificate</h2>
 <?php
-      if ($certsage->certificateExists):
+if ($certificate["valid"]):
 ?>
-
 <p>
 Existing Certificate Details<br>
-Issued: <?= $certsage->validFrom ?> UTC<br>
-Renew: <?= $certsage->renewAt ?> UTC<br>
-Expires: <?= $certsage->validTo ?> UTC<br>
-Should Renew Now: <?= $certsage->shouldRenewNow ? "Yes" : "No" ?><br>
+<div style="text-align: left; color: green">
+Issued: <?= gmdate("M j, Y g:i:s A", $certificate["validFrom"]); ?> UTC
+</div>
+<div style="text-align: left; color: <?= $certificate["renewNow"] ? "yellow" : "green" ?>">
+Renew: <?= gmdate("M j, Y g:i:s A", $certificate["renewAt"]); ?> UTC
+</div>
+<div style="text-align: left; color: <?= $certificate["expired"] ? "red" : "green" ?>">
+Expiry: <?= gmdate("M j, Y g:i:s A", $certificate["validTo"]); ?> UTC
+</div>
 </p>
 <?php
-      endif;
+endif;
 ?>
 
 <p>
-One domain name per line<br>
-No wildcards (*) allowed<br>
-<textarea name="domainNames" rows="5"><?= $certsage->domainNames ?></textarea>
+Domain and Subdomain Names<br>
+One per line; No wildcards (*)<br>
+<textarea name="identifiers" rows="5"><?= $certificate["valid"] ? implode("\n", $certificate["identifiers"]) : "" ?></textarea>
 </p>
 
 <p>
 Key Type<br>
-<input name="keyType" value="RSA" type="radio" <?= (!isset($certsage->keyType) || $certsage->keyType === "RSA") ? "checked" : "" ?>> RSA (more compatible)<br>
-<input name="keyType" value="EC" type="radio" <?= (isset($certsage->keyType) && $certsage->keyType === "EC") ? "checked" : "" ?>> EC (more efficient)
+<input name="keyType" value="RSA" type="radio" <?= (!$certificate["valid"] || $certificate["keyType"] === "RSA") ? "checked" : "" ?>> RSA (more compatible)<br>
+<input name="keyType" value="EC"  type="radio" <?= ( $certificate["valid"] && $certificate["keyType"] === "EC" ) ? "checked" : "" ?>> EC  (more efficient)
 </p>
 
 <p>
 Password<br>
-Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 <input name="password" type="password">
 </p>
 
-<input name="action" value="acquirecertificate" type="hidden">
-
-<button name="environment" value="staging" type="submit">Acquire Staging Certificate</button>
-<button name="environment" value="production" type="submit">Acquire Production Certificate</button>
+<button name="action" value="acquireandinstall" type="submit">Acquire Certificate and<br>Install into cPanel</button><br>
+<button name="action" value="acquire" type="submit">Acquire Certificate</button><br>
+<button name="action" value="install" type="submit">Install into cPanel</button><br>
+<button name="action" value="test" type="submit">Test</button>
 </form>
-
-<form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
-<h2>Install Certificate into cPanel</h2>
-
-<p>
-Password<br>
-Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
-<input name="password" type="password">
-</p>
-
-<input name="action" value="installcertificate" type="hidden">
-
-<button name="environment" value="production" type="submit">Install Certificate into cPanel</button>
-</form>
-<?php
-      break;
-    case "success":
-      switch ($_POST["action"]):
-        case "acquirecertificate":
-          switch ($_POST["environment"]):
-            case "staging":
-?>
-<h1>Success!</h1>
-
-<p>Your staging certificate was acquired. It was not saved to prevent accidental installation.</p>
-
-<p>Your likely next step is to go back to the beginning to acquire your production certificate.</p>
-
-<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
-
-<p><a href="">Go back to the beginning</a></p>
-<?php
-              break;
-            case "production":
-?>
-<h1>Success!</h1>
-
-<p>Your production certificate was acquired. It was saved in <?= $certsage->dataDirectory ?>.</p>
-
-<p>Your likely next step is to go back to the beginning to install your certificate into cPanel.</p>
-
-<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
-
-<p><a href="">Go back to the beginning</a></p>
-<?php
-              break;
-          endswitch;
-          break;
-        case "installcertificate":
-          switch ($_POST["environment"]):
-            case "staging":
-?>
-This should never happen.
-<?php
-              break;
-            case "production":
-?>
-<h1>Success!</h1>
-
-<p>Your certificate was installed into cPanel.</p>
-
-<p>You are likely good to go.</p>
-
-<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
-
-<p><a href="">Go back to the beginning</a></p>
-<?php
-              break;
-          endswitch;
-          break;
-      endswitch;
-      break;
-    case "trouble":
-?>
-<h1>Trouble...</h1>
-
-<p><?= $error ?></p>
-
-<p>If you need help with resolving this issue, please post a topic in the help category of the <a href="https://community.letsencrypt.org/" target="_blank">Let's Encrypt Community</a>.</p>
-
-<p><a href="">Go back to the beginning</a></p>
-<?php
-      break;
-  endswitch;
-?>
 </main>
 
 <footer>
