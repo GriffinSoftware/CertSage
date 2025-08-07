@@ -14,13 +14,15 @@ Usage of this software constitutes acceptance of full liability for any conseque
 
 class CertSage
 {
-  public $version = "1.2.0";
+  public $version = "1.3.0";
   public $dataDirectory = "../CertSage";
 
-  private $thumbprint;
-  private $acmeDirectory;
+  private $password;
   private $accountKey;
   private $accountUrl;
+  private $thumbprint;
+  private $nonce;
+  private $acmeDirectory;
   private $responses;
 
   private function createDirectory($directoryPath, $permissions)
@@ -120,10 +122,8 @@ class CertSage
     return null;
   }
 
-  // CertSage is a singleton class due to static nonce
   private function sendRequest($url, $expectedResponseCode, $payload = null, $jwk = null)
   {
-    static $nonce = null;
     $headers = [];
     $headerSize = 0;
 
@@ -140,18 +140,18 @@ class CertSage
 
     if (isset($payload))
     {
-      if (!isset($nonce))
+      if (!isset($this->nonce))
       {
         $response = $this->sendRequest($this->acmeDirectory["newNonce"], 204);
 
-        if (!isset($nonce))
+        if (!isset($this->nonce))
           throw new Exception("get new nonce failed");
       }
 
       $protected = [
         "url"   => $url,
         "alg"   => "RS256",
-        "nonce" => $nonce
+        "nonce" => $this->nonce
       ];
 
       if (isset($jwk))
@@ -244,12 +244,50 @@ class CertSage
       throw new Exception("unexpected response code: $responseCode vs $expectedResponseCode");
     }
 
-    $nonce = $this->findHeader($response, "replay-nonce", false);
+    $this->nonce = $this->findHeader($response, "replay-nonce", false);
 
     return $response;
   }
 
-  private function initialize()
+  public function initialize()
+  {
+    // *** CREATE DATA DIRECTORY ***
+
+    $this->createDirectory($this->dataDirectory, 0755);
+
+    // *** READ PASSWORD FILE ***
+
+    $this->password = $this->readFile($this->dataDirectory . "/password.txt");
+
+    if (isset($this->password))
+      return;
+
+    // *** GENERATE RANDOM PASSWORD ***
+
+    $this->password = $this->encodeBase64(random_bytes(15));
+
+    // *** WRITE PASSWORD FILE ***
+
+    $this->writeFile($this->dataDirectory . "/password.txt",
+                     $this->password,
+                     0644);
+  }
+
+  public function checkPassword()
+  {
+    // *** CHECK PASSWORD ***
+
+    if (!isset($_POST["password"]))
+      throw new Exception("password was missing");
+
+    if (!is_string($_POST["password"]))
+      throw new Exception("password was not a string");
+
+    if ($_POST["password"] !== $this->password)
+      throw new Exception("password was incorrect");
+  }
+
+  private function establishAccount()
   {
     // *** ESTABLISH ENVIRONMENT ***
 
@@ -279,10 +317,6 @@ class CertSage
 
         throw new Exception("unknown environment: " . $_POST["environment"]);
     }
-
-    // *** CREATE DATA DIRECTORY ***
-
-    $this->createDirectory($this->dataDirectory, 0755);
 
     // *** READ ACCOUNT KEY ***
 
@@ -382,13 +416,20 @@ class CertSage
     $this->accountUrl = $this->findHeader($response, "location");
   }
 
+  private function dumpResponses()
+  {
+    $this->writeFile($this->dataDirectory . "/responses.txt",
+                     implode("\n\n-----\n\n", array_reverse($this->responses)),
+                     0644);
+  }
+
   public function acquireCertificate()
   {
     $this->responses = [];
 
     try
     {
-      $this->initialize();
+      $this->establishAccount();
 
       // *** CREATE NEW ORDER ***
 
@@ -631,7 +672,7 @@ class CertSage
 
       if ($_POST["environment"] == "production")
       {
-        // *** WRITE CERTIFICATE AND KEY ***
+        // *** WRITE CERTIFICATE AND CERTIFICATE KEY ***
 
         $this->writeFile($this->dataDirectory . "/certificate.crt",
                          $certificate,
@@ -644,10 +685,99 @@ class CertSage
     }
     finally
     {
-      $this->writeFile($this->dataDirectory . "/responses.txt",
-                       implode("\n\n-----\n\n", array_reverse($this->responses)),
-                       0644);
+      $this->dumpResponses();
     }
+  }
+
+  public function installCertificate()
+  {
+    // *** READ CERTIFICATE ***
+
+    $certificate = $this->readFile($this->dataDirectory . "/certificate.crt");
+
+    if (!isset($certificate))
+      throw new Exception("certificate file does not exist");
+
+    // *** EXTRACT CERTIFICATE ***
+
+    $regex = "~^(-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END CERTIFICATE-----)~";
+    $outcome = preg_match($regex, $certificate, $matches);
+
+    if ($outcome === false)
+      throw new Exception("extract certificate failed");
+
+    if ($outcome === 0)
+      throw new Exception("certificate format mismatch");
+
+    $certificate = $matches[1];
+
+    // *** CHECK CERTIFICATE ***
+
+    $certificateObject = openssl_x509_read($certificate);
+
+    if ($certificateObject === false)
+      throw new Exception("check certificate failed");
+
+    // *** READ CERTIFICATE KEY ***
+
+    $certificateKey = $this->readFile($this->dataDirectory . "/certificate.key");
+
+    if (!isset($certificateKey))
+      throw new Exception("certificate key file does not exist");
+
+    // *** EXTRACT CERTIFICATE KEY ***
+
+    $regex = "~^(-----BEGIN PRIVATE KEY-----\n(?:[A-Za-z0-9+/]{64}\n)*(?:(?:[A-Za-z0-9+/]{4}){0,15}(?:[A-Za-z0-9+/]{2}(?:[A-Za-z0-9+/]|=)=)?\n)?-----END PRIVATE KEY-----)~";
+    $outcome = preg_match($regex, $certificateKey, $matches);
+
+    if ($outcome === false)
+      throw new Exception("extract certificate key failed");
+
+    if ($outcome === 0)
+      throw new Exception("certificate key format mismatch");
+
+    $certificateKey = $matches[1];
+
+    // *** CHECK CERTIFICATE KEY ***
+
+    $certificateKeyObject = openssl_pkey_get_private($certificateKey);
+
+    if ($certificateKeyObject === false)
+      throw new Exception("check certificate key failed");
+
+    // *** VERIFY CERTIFICATE AND CERTIFICATE KEY CORRESPOND ***
+
+    if (!openssl_x509_check_private_key($certificateObject, $certificateKeyObject))
+      throw new Exception("certificate and certificate key do not correspond");
+
+    // *** INSTALL CERTIFICATE ***
+
+    $certificateData = openssl_x509_parse($certificateObject);
+
+    if ($certificateData === false)
+      throw new Exception("parse certificate failed");
+
+    $domain = $certificateData["subject"]["CN"];
+    $cert   = rawurlencode($certificate);
+    $key    = rawurlencode($certificateKey);
+
+    $output = `uapi SSL install_ssl domain=$domain cert=$cert key=$key --output=json`;
+
+    // !!! need to test with shell turned off in cPanel
+    if ($output === false)
+      throw new Exception("shell execution pipe could not be established");
+
+    if (!isset($output))
+      throw new Exception("uapi SSL install_ssl failed");
+
+    $output = `uapi SSL toggle_ssl_redirect_for_domains domains=$domain state=1 --output=json`;
+
+    if ($output === false)
+      throw new Exception("shell execution pipe could not be established");
+
+    if (!isset($output))
+      throw new Exception("uapi SSL toggle_ssl_redirect_for_domains failed");
+
   }
 
   public function updateContact()
@@ -656,7 +786,7 @@ class CertSage
 
     try
     {
-      $this->initialize();
+      $this->establishAccount();
 
       // *** UPDATE CONTACT ***
 
@@ -683,9 +813,7 @@ class CertSage
     }
     finally
     {
-      $this->writeFile($this->dataDirectory . "/responses.txt",
-                       implode("\n\n-----\n\n", array_reverse($this->responses)),
-                       0644);
+      $this->dumpResponses();
     }
   }
 }
@@ -696,17 +824,27 @@ try
 {
   $certsage = new CertSage();
 
+  $certsage->initialize();
+
   if (!isset($_POST["action"]))
     $page = "welcome";
   elseif (!is_string($_POST["action"]))
     throw new Exception("action was not a string");
   else
   {
+    $certsage->checkpassword();
+
     switch ($_POST["action"])
     {
       case "acquirecertificate":
 
         $certsage->acquireCertificate();
+
+        break;
+
+      case "installcertificate":
+
+        $certsage->installCertificate();
 
         break;
 
@@ -739,7 +877,6 @@ catch (Exception $e)
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#e1b941">
 <meta name="referrer" content="origin">
-</script>
 <style>
 *
 {
@@ -764,7 +901,7 @@ body
   padding: 1.5rem;
 }
 
-header, main, footer, hr, article, section,
+header, main, footer, hr, article,
 h1, h2, h3, h4, h5, h6, p, form
 {
   margin-bottom: 1.5rem;
@@ -862,7 +999,7 @@ form
   text-align: center;
 }
 
-textarea
+textarea, input
 {
   display: inline-block;
   margin-top: 0.75rem;
@@ -961,7 +1098,7 @@ Please use the <a href="https://letsencrypt.org/docs/staging-environment/" targe
 <hr>
 
 <form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
-<h2>Acquire a Certificate</h2>
+<h2>Acquire Certificate</h2>
 
 <p>
 One domain name per line<br>
@@ -969,10 +1106,32 @@ No wildcards (*) allowed<br>
 <textarea name="domainNames" rows="5"></textarea>
 </p>
 
+<p>
+Password<br>
+Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
+<input name="password" type="password">
+</p>
+
 <input name="action" value="acquirecertificate" type="hidden">
 
 <button name="environment" value="staging" type="submit">Acquire Staging Certificate</button>
 <button name="environment" value="production" type="submit">Acquire Production Certificate</button>
+</form>
+
+<hr>
+
+<form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
+<h2>Install Certificate into cPanel</h2>
+
+<p>
+Password<br>
+Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
+<input name="password" type="password">
+</p>
+
+<input name="action" value="installcertificate" type="hidden">
+
+<button name="environment" value="production" type="submit">Install Certificate into cPanel</button>
 </form>
 
 <hr>
@@ -986,10 +1145,15 @@ Leave blank to unsubscribe<br>
 <textarea name="emailAddresses" rows="5"></textarea>
 </p>
 
+<p>
+Password<br>
+Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
+<input name="password" type="password">
+</p>
+
 <input name="action" value="updatecontact" type="hidden">
 
-<button name="environment" value="staging" type="submit">Update Staging Contact</button>
-<button name="environment" value="production" type="submit">Update Production Contact</button>
+<button name="environment" value="production" type="submit">Update Contact Information</button>
 </form>
 
 <?php
@@ -1003,9 +1167,9 @@ Leave blank to unsubscribe<br>
 
 <h1>Success!</h1>
 
-<p>A staging certificate was acquired. It was not saved to prevent accidental installation.</p>
+<p>Your staging certificate was acquired. It was not saved to prevent accidental installation.</p>
 
-<p>Your likely next step is to go back to the beginning and acquire a production certificate.</p>
+<p>Your likely next step is to go back to the beginning to acquire your production certificate.</p>
 
 <p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
@@ -1018,9 +1182,35 @@ Leave blank to unsubscribe<br>
 
 <h1>Success!</h1>
 
-<p>Your production certificate and its private key have been saved in <?= $certsage->dataDirectory ?> and are ready to install.</p>
+<p>Your production certificate was acquired. It was saved in <?= $certsage->dataDirectory ?>.</p>
 
-<p>Your likely next step is to go back to the beginning and update your production contact information.</p>
+<p>Your likely next step is to go back to the beginning to install your certificate into cPanel.</p>
+
+<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
+
+<p><a href="">Go back to the beginning</a></p>
+
+<?php
+              break;
+          endswitch;
+          break;
+        case "installcertificate":
+          switch ($_POST["environment"]):
+            case "staging":
+?>
+
+
+
+<?php
+              break;
+            case "production":
+?>
+
+<h1>Success!</h1>
+
+<p>Your certificate was installed into cPanel.</p>
+
+<p>Your likely next step is to go back to the beginning to update your contact information.</p>
 
 <p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
@@ -1035,15 +1225,7 @@ Leave blank to unsubscribe<br>
             case "staging":
 ?>
 
-<h1>Success!</h1>
 
-<p>Your staging contact information has been updated.</p>
-
-<p>Your likely next step is to go back to the beginning and update your production contact information.</p>
-
-<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
-
-<p><a href="">Go back to the beginning</a></p>
 
 <?php
               break;
@@ -1052,9 +1234,9 @@ Leave blank to unsubscribe<br>
 
 <h1>Success!</h1>
 
-<p>Your production contact information has been updated.</p>
+<p>Your contact information was updated.</p>
 
-<p>Your likely next step is to install your production certificate.</p>
+<p>You are likely good to go.</p>
 
 <p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
