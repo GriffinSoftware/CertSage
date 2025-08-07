@@ -14,7 +14,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 
 class CertSage
 {
-  public $version = "2.1.0";
+  public $version = "2.2.0";
   public $dataDirectory = "../CertSage";
   public $autorenew;
   public $certificateExists;
@@ -972,43 +972,6 @@ class CertSage
         throw new Exception("failed while setting crontab");
     }
   }
-
-  public function updateContact()
-  {
-    $this->responses = [];
-
-    try
-    {
-      $this->establishAccount();
-
-      // *** UPDATE CONTACT ***
-
-      if (!isset($_POST["emailAddresses"]))
-        throw new Exception("emailAddresses was missing");
-
-      if (!is_string($_POST["emailAddresses"]))
-        throw new Exception("emailAddresses was not a string");
-
-      $contact = [];
-
-      for ($emailAddress = strtok($_POST["emailAddresses"], "\r\n");
-           $emailAddress !== false;
-           $emailAddress = strtok("\r\n"))
-        $contact[] = "mailto:$emailAddress";
-
-      $url = $this->accountUrl;
-
-      $payload = [
-        "contact" => $contact
-      ];
-
-      $response = $this->sendRequest($url, 200, $payload);
-    }
-    finally
-    {
-      $this->dumpResponses();
-    }
-  }
 }
 
 // *** MAIN ***
@@ -1056,12 +1019,6 @@ try
       case "installcertificate":
 
         $certsage->installCertificate();
-
-        break;
-
-      case "updatecontact":
-
-        $certsage->updateContact();
 
         break;
 
@@ -1328,26 +1285,6 @@ Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
 
 <button name="environment" value="production" type="submit">Install Certificate into cPanel</button>
 </form>
-
-<form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
-<h2>Receive Let's Encrypt Notifications</h2>
-
-<p>
-One email address per line<br>
-Leave blank to unsubscribe<br>
-<textarea name="emailAddresses" rows="5"></textarea>
-</p>
-
-<p>
-Password<br>
-Contents of <?= $certsage->dataDirectory ?>/password.txt<br>
-<input name="password" type="password">
-</p>
-
-<input name="action" value="updatecontact" type="hidden">
-
-<button name="environment" value="production" type="submit">Update Contact Information</button>
-</form>
 <?php
       break;
     case "success":
@@ -1394,28 +1331,6 @@ This should never happen.
 <h1>Success!</h1>
 
 <p>Your certificate was installed into cPanel.</p>
-
-<p>Your likely next step is to go back to the beginning to update your contact information.</p>
-
-<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
-
-<p><a href="">Go back to the beginning</a></p>
-<?php
-              break;
-          endswitch;
-          break;
-        case "updatecontact":
-          switch ($_POST["environment"]):
-            case "staging":
-?>
-This should never happen.
-<?php
-              break;
-            case "production":
-?>
-<h1>Success!</h1>
-
-<p>Your contact information was updated.</p>
 
 <p>You are likely good to go.</p>
 
