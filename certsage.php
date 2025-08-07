@@ -14,7 +14,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 
 class CertSage
 {
-  public $version = "1.4.1";
+  public $version = "1.4.2";
   public $dataDirectory = "../CertSage";
 
   private $password;
@@ -562,14 +562,18 @@ class CertSage
                            "$challengetoken." . $this->thumbprint,
                            0644);
 
-        // *** CONFIRM CHALLENGES ***
-
+        // delay for creation of challenge files
         sleep(2);
+
+        // *** CONFIRM CHALLENGES ***
 
         $payload = (object)[]; // empty object
 
         foreach ($challengeurls as $url)
           $challenge = $this->sendRequest($url, 200, $payload);
+
+        // delay for processing of challenges
+        sleep(6);
 
         // *** CHECK AUTHORIZATIONS ***
 
@@ -579,8 +583,6 @@ class CertSage
         {
           for ($attempt = 1; true; ++$attempt)
           {
-            sleep(1);
-
             $response = $this->sendRequest($url, 200, $payload);
 
             $authorization = $this->decodeJSON($response["body"]);
@@ -590,6 +592,9 @@ class CertSage
 
             if ($attempt == 10)
               throw new Exception("authorization still pending after $attempt attempts");
+
+            // linear backoff
+            sleep(2);
           }
 
           if ($authorization["status"] !== "valid")
@@ -689,6 +694,9 @@ class CertSage
 
       if ($order["status"] !== "valid")
       {
+        // delay for finalizing order
+        sleep(2);
+
         // *** CHECK ORDER ***
 
         $url = $orderurl;
@@ -697,8 +705,6 @@ class CertSage
 
         for ($attempt = 1; true; ++$attempt)
         {
-          sleep(1);
-
           $response = $this->sendRequest($url, 200, $payload);
 
           $order = $this->decodeJSON($response["body"]);
@@ -710,6 +716,9 @@ class CertSage
 
           if ($attempt == 10)
             throw new Exception("order still pending after $attempt attempts");
+
+          // linear backoff
+          sleep(2);
         }
 
         if ($order["status"] !== "valid")
