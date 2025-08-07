@@ -12,16 +12,16 @@ No guarantees or warranties of any kind are made as to the fitness of this softw
 Usage of this software constitutes acceptance of full liability for any consequences resulting from its usage.
 */
 
-$version = "1.1.0";
-$dataDirectory = "../CertSage";
-
 class CertSage
 {
-  private $dataDirectory = null;
-  private $responses = [];
-  private $acmeDirectory = null;
-  private $accountKey = null;
-  private $accountUrl = null;
+  public $version = "1.2.0";
+  public $dataDirectory = "../CertSage";
+
+  private $thumbprint;
+  private $acmeDirectory;
+  private $accountKey;
+  private $accountUrl;
+  private $responses;
 
   private function createDirectory($directoryPath, $permissions)
   {
@@ -120,7 +120,7 @@ class CertSage
     return null;
   }
 
-  // singleton required due to static nonce?
+  // CertSage is a singleton class due to static nonce
   private function sendRequest($url, $expectedResponseCode, $payload = null, $jwk = null)
   {
     static $nonce = null;
@@ -238,7 +238,7 @@ class CertSage
         $problem = $this->decodeJSON($response["body"]);
 
         if (isset($problem["type"], $problem["detail"]))
-          throw new Exception($problem["type"] . ": " . $problem["detail"]);
+          throw new Exception($problem["type"] . "<br>" . $problem["detail"]);
       }
 
       throw new Exception("unexpected response code: $responseCode vs $expectedResponseCode");
@@ -249,80 +249,44 @@ class CertSage
     return $response;
   }
 
-  public function dumpResponses($fileName)
-  {
-    $this->writeFile($this->dataDirectory . "/$fileName",
-                     implode("\n\n-----\n\n", array_reverse($this->responses)),
-                     0600);
-  }
-
-  public function __construct($version, $dataDirectory, $code = null)
-  {
-    // *** SET VERSION ***
-
-    $this->version = $version;
-
-    // *** CREATE DATA DIRECTORY ***
-
-    $this->createDirectory($dataDirectory, 0700);
-
-    $this->dataDirectory = $dataDirectory;
-
-    $filePath = $dataDirectory . "/code.txt";
-
-    try
-    {
-      if (isset($code))
-      {
-        // *** CHECK CODE ***
-
-        $correctCode = $this->readFile($filePath);
-
-        if (!isset($correctCode))
-          throw new Exception("code.txt was missing");
-
-        if ($code !== $correctCode)
-          throw new Exception("code was incorrect");
-      }
-    }
-    finally
-    {
-      // *** UPDATE CODE ***
-
-      $this->writeFile($filePath,
-                       $this->encodeBase64(random_bytes(12)),
-                       0600);
-    }
-  }
-
-  public function execute($environment, $emailAddresses, $domainNames)
+  private function initialize()
   {
     // *** ESTABLISH ENVIRONMENT ***
 
-    switch ($environment)
+    if (!isset($_POST["environment"]))
+      throw new Exception("environment was missing");
+
+    if (!is_string($_POST["environment"]))
+      throw new Exception("environment was not a string");
+
+    switch ($_POST["environment"])
     {
       case "production":
 
-        $filePath = $this->dataDirectory . "/account.key";
+        $fileName = "account.key";
         $url = "https://acme-v02.api.letsencrypt.org/directory";
 
         break;
 
       case "staging":
 
-        $filePath = $this->dataDirectory . "/account-staging.key";
+        $fileName = "account-staging.key";
         $url = "https://acme-staging-v02.api.letsencrypt.org/directory";
 
         break;
 
       default:
 
-        throw new Exception("unknown environment");
+        throw new Exception("unknown environment: " . $_POST["environment"]);
     }
+
+    // *** CREATE DATA DIRECTORY ***
+
+    $this->createDirectory($this->dataDirectory, 0755);
 
     // *** READ ACCOUNT KEY ***
 
-    $this->accountKey = $this->readFile($filePath);
+    $this->accountKey = $this->readFile($this->dataDirectory . "/$fileName");
 
     $accountKeyExists = isset($this->accountKey);
 
@@ -376,7 +340,7 @@ class CertSage
     if ($digest === false)
       throw new Exception("digest JWK failed");
 
-    $thumbprint = $this->encodeBase64($digest);
+    $this->thumbprint = $this->encodeBase64($digest);
 
     // *** GET ACME DIRECTORY ***
 
@@ -410,347 +374,23 @@ class CertSage
 
       // *** WRITE ACCOUNT KEY ***
 
-      $this->writeFile($filePath,
+      $this->writeFile($this->dataDirectory . "/$fileName",
                        $this->accountKey,
-                       0600);
+                       0644);
     }
 
     $this->accountUrl = $this->findHeader($response, "location");
+  }
 
-    // *** UPDATE CONTACT ***
-
-    $url = $this->accountUrl;
-
-    $contact = [];
-
-    foreach ($emailAddresses as $emailAddress)
-      $contact[] = "mailto:$emailAddress";
-
-    $payload = [
-      "contact" => $contact
-    ];
-
-    $response = $this->sendRequest($url, 200, $payload);
-
-    // *** STOP IF NO DOMAIN NAMES SUBMITTED ***
-
-    if (empty($domainNames))
-      return;
-
-    // *** CREATE NEW ORDER ***
-
-    $url = $this->acmeDirectory["newOrder"];
-
-    $identifiers = [];
-
-    foreach ($domainNames as $domainName)
-      $identifiers[] = [
-        "type"  => "dns",
-        "value" => $domainName
-      ];
-
-    $payload = [
-      "identifiers" => $identifiers
-    ];
-
-    $response = $this->sendRequest($url, 201, $payload);
-
-    $orderurl = $this->findHeader($response, "location");
-    $order = $this->decodeJSON($response["body"]);
-
-    // *** GET CHALLENGES ***
-
-    $authorizationurls = [];
-    $challengeurls = [];
-    $challengetokens = [];
-
-    $payload = ""; // empty
-
-    foreach ($order["authorizations"] as $url)
-    {
-      $response = $this->sendRequest($url, 200, $payload);
-
-      $authorization = $this->decodeJSON($response["body"]);
-
-      if ($authorization["status"] === "valid")
-        continue;
-
-      $authorizationurls[] = $url;
-
-      foreach ($authorization["challenges"] as $challenge)
-      {
-        if ($challenge["type"] !== "http-01")
-          continue;
-
-        $challengeurls[] = $challenge["url"];
-        $challengetokens[] = $challenge["token"];
-        continue 2;
-      }
-
-      throw new Exception("no http-01 challenge found");
-    }
-
-    // *** WRITE HTTP-01 CHALLENGE FILES ***
-
-    $this->createDirectory("./.well-known", 0755);
-    $this->createDirectory("./.well-known/acme-challenge", 0755);
+  public function acquireCertificate()
+  {
+    $this->responses = [];
 
     try
     {
-      foreach ($challengetokens as $challengetoken)
-        $this->writeFile("./.well-known/acme-challenge/$challengetoken",
-                         "$challengetoken.$thumbprint",
-                         0644);
+      $this->initialize();
 
-      // *** CONFIRM CHALLENGES ***
-
-      sleep(2);
-
-      $payload = (object)[]; // empty object
-
-      foreach ($challengeurls as $url)
-        $challenge = $this->sendRequest($url, 200, $payload);
-
-      // *** CHECK AUTHORIZATIONS ***
-
-      $payload = ""; // empty
-
-      foreach ($authorizationurls as $url)
-      {
-        for ($attempt = 1; true; ++$attempt)
-        {
-          sleep(1);
-
-          $response = $this->sendRequest($url, 200, $payload);
-
-          $authorization = $this->decodeJSON($response["body"]);
-
-          if ($authorization["status"] !== "pending")
-            break;
-
-          if ($attempt == 10)
-            throw new Exception("authorization still pending after $attempt attempts");
-        }
-
-        if ($authorization["status"] !== "valid")
-          throw new Exception("authorization failed");
-      }
-    }
-    finally
-    {
-      // *** DELETE HTTP-01 CHALLENGE FILES ***
-
-      foreach ($challengetokens as $challengetoken)
-        $this->deleteFile("./.well-known/acme-challenge/$challengetoken");
-    }
-
-    // *** GENERATE CERTIFICATE KEY ***
-
-    $options = [
-      "digest_alg"       => "sha256",
-      "private_key_bits" => 2048,
-      "private_key_type" => OPENSSL_KEYTYPE_RSA
-    ];
-
-    $certificateKeyObject = openssl_pkey_new($options);
-
-    if ($certificateKeyObject === false)
-      throw new Exception("generate certificate key failed");
-
-    if (!openssl_pkey_export($certificateKeyObject, $certificateKey))
-      throw new Exception("export certificate key failed");
-
-    // *** GENERATE CSR ***
-
-    $dn = [
-      "commonName" => $domainNames[0]
-    ];
-
-    $options = [
-      "digest_alg" => "sha256",
-      "config" => $this->dataDirectory . "/openssl.cnf"
-    ];
-
-    $opensslcnf =
-      "[req]\n" .
-      "distinguished_name = req_distinguished_name\n" .
-      "req_extensions = v3_req\n\n" .
-      "[req_distinguished_name]\n\n" .
-      "[v3_req]\n" .
-      "subjectAltName = @san\n\n" .
-      "[san]\n";
-
-    $i = 0;
-    foreach ($domainNames as $domainName)
-    {
-      ++$i;
-      $opensslcnf .= "DNS.$i = $domainName\n";
-    }
-
-    try
-    {
-      $this->writeFile($this->dataDirectory . "/openssl.cnf",
-                       $opensslcnf,
-                       0600);
-
-      $csrObject = openssl_csr_new($dn, $certificateKey, $options);
-
-      if ($csrObject === false)
-        throw new Exception("generate csr failed");
-    }
-    finally
-    {
-      $this->deleteFile($this->dataDirectory . "/openssl.cnf");
-    }
-
-    if (!openssl_csr_export($csrObject, $csr))
-      throw new Exception("export csr failed");
-
-    // *** FINALIZE ORDER ***
-
-    $url = $order["finalize"];
-
-    $regex = "~^-----BEGIN CERTIFICATE REQUEST-----([A-Za-z0-9+/]+)=?=?-----END CERTIFICATE REQUEST-----$~";
-    $outcome = preg_match($regex, str_replace("\n", "", $csr), $matches);
-
-    if ($outcome === false)
-      throw new Exception("extract csr failed");
-
-    if ($outcome === 0)
-      throw new Exception("csr format mismatch");
-
-    $payload = [
-      "csr" => strtr($matches[1], "+/", "-_")
-    ];
-
-    $response = $this->sendRequest($url, 200, $payload);
-
-    $order = $this->decodeJSON($response["body"]);
-
-    if ($order["status"] !== "valid")
-    {
-      // *** CHECK ORDER ***
-
-      $url = $orderurl;
-
-      $payload = ""; // empty
-
-      for ($attempt = 1; true; ++$attempt)
-      {
-        sleep(1);
-
-        $response = $this->sendRequest($url, 200, $payload);
-
-        $order = $this->decodeJSON($response["body"]);
-
-        if (!(   $order["status"] === "pending"
-              || $order["status"] === "processing"
-              || $order["status"] === "ready"))
-          break;
-
-        if ($attempt == 10)
-          throw new Exception("order still pending after $attempt attempts");
-      }
-
-      if ($order["status"] !== "valid")
-        throw new Exception("order failed");
-    }
-
-    // *** DOWNLOAD CERTIFICATE ***
-
-    $url = $order["certificate"];
-
-    $payload = ""; // empty
-
-    $response = $this->sendRequest($url, 200, $payload);
-
-    $certificate = $response["body"];
-
-    // *** WRITE CERTIFICATE AND KEY ***
-
-    $this->writeFile($this->dataDirectory . "/certificate.crt",
-                     $certificate,
-                     0600);
-
-    $this->writeFile($this->dataDirectory . "/certificate.key",
-                     $certificateKey,
-                     0600);
-  }
-}
-
-try
-{
-  // *** PROCESS ACTION ***
-
-  if (!isset($_POST["action"]))
-    $action = "";
-  else
-  {
-    if (!is_string($_POST["action"]))
-      throw new Exception("action was not a string");
-
-    $action = $_POST["action"];
-  }
-
-  switch ($action)
-  {
-    case "":
-
-      // *** CREATE DATA DIRECTORY AND UPDATE CODE ***
-
-      $certsage = new CertSage($version, $dataDirectory);
-
-      $page = "welcome";
-
-      break;
-
-    case "proceed":
-
-      // *** PROCESS CODE ***
-
-      if (!isset($_POST["code"]))
-        throw new Exception("code was missing");
-
-      if (!is_string($_POST["code"]))
-        throw new Exception("code was not a string");
-
-      $code = $_POST["code"];
-
-      // *** CREATE DATA DIRECTORY, CHECK CODE, AND UPDATE CODE ***
-
-      $certsage = new CertSage($version, $dataDirectory, $code);
-
-      // *** PROCESS ENVIRONMENT ***
-
-      if (!isset($_POST["environment"]))
-        throw new Exception("environment was missing");
-
-      if (!is_string($_POST["environment"]))
-        throw new Exception("environment was not a string");
-
-      $environment = $_POST["environment"];
-
-      // *** PROCESS EMAIL ADDRESSES ***
-
-      if (!isset($_POST["emailAddresses"]))
-        throw new Exception("emailAddresses was missing");
-
-      if (!is_string($_POST["emailAddresses"]))
-        throw new Exception("emailAddresses was not a string");
-
-      $emailAddresses = [];
-
-      for ($tok = strtok($_POST["emailAddresses"], "\r\n"); $tok !== false; $tok = strtok("\r\n"))
-      {
-        $tok = trim($tok);
-
-        if (strlen($tok) == 0)
-          continue;
-
-        $emailAddresses[] = $tok;
-      }
-
-      // *** PROCESS DOMAIN NAMES ***
+      // *** CREATE NEW ORDER ***
 
       if (!isset($_POST["domainNames"]))
         throw new Exception("domainNames was missing");
@@ -758,29 +398,330 @@ try
       if (!is_string($_POST["domainNames"]))
         throw new Exception("domainNames was not a string");
 
-      $domainNames = [];
+      $identifiers = [];
 
-      for ($tok = strtok($_POST["domainNames"], "\r\n"); $tok !== false; $tok = strtok("\r\n"))
+      for ($domainName = strtok($_POST["domainNames"], "\r\n");
+           $domainName !== false;
+           $domainName = strtok("\r\n"))
+        $identifiers[] = [
+          "type"  => "dns",
+          "value" => $domainName
+        ];
+
+      $url = $this->acmeDirectory["newOrder"];
+
+      $payload = [
+        "identifiers" => $identifiers
+      ];
+
+      $response = $this->sendRequest($url, 201, $payload);
+
+      $orderurl = $this->findHeader($response, "location");
+      $order = $this->decodeJSON($response["body"]);
+
+      // *** GET CHALLENGES ***
+
+      $authorizationurls = [];
+      $challengeurls = [];
+      $challengetokens = [];
+
+      $payload = ""; // empty
+
+      foreach ($order["authorizations"] as $url)
       {
-        $tok = trim($tok);
+        $response = $this->sendRequest($url, 200, $payload);
 
-        if (strlen($tok) == 0)
+        $authorization = $this->decodeJSON($response["body"]);
+
+        if ($authorization["status"] === "valid")
           continue;
 
-        $domainNames[] = $tok;
+        $authorizationurls[] = $url;
+
+        foreach ($authorization["challenges"] as $challenge)
+        {
+          if ($challenge["type"] === "http-01")
+          {
+            $challengeurls[] = $challenge["url"];
+            $challengetokens[] = $challenge["token"];
+            continue 2;
+          }
+        }
+
+        throw new Exception("no http-01 challenge found");
       }
 
-      // *** EXECUTE ***
+      // *** CREATE HTTP-01 CHALLENGE DIRECTORIES ***
 
-      $certsage->execute($environment, $emailAddresses, $domainNames);
+      $this->createDirectory("./.well-known", 0755);
+      $this->createDirectory("./.well-known/acme-challenge", 0755);
 
-      $page = "success";
+      try
+      {
+        // *** WRITE HTTP-01 CHALLENGE FILES ***
 
-      break;
+        foreach ($challengetokens as $challengetoken)
+          $this->writeFile("./.well-known/acme-challenge/$challengetoken",
+                           "$challengetoken." . $this->thumbprint,
+                           0644);
 
-    default:
+        // *** CONFIRM CHALLENGES ***
 
-      throw new Exception("unknown action");
+        sleep(2);
+
+        $payload = (object)[]; // empty object
+
+        foreach ($challengeurls as $url)
+          $challenge = $this->sendRequest($url, 200, $payload);
+
+        // *** CHECK AUTHORIZATIONS ***
+
+        $payload = ""; // empty
+
+        foreach ($authorizationurls as $url)
+        {
+          for ($attempt = 1; true; ++$attempt)
+          {
+            sleep(1);
+
+            $response = $this->sendRequest($url, 200, $payload);
+
+            $authorization = $this->decodeJSON($response["body"]);
+
+            if ($authorization["status"] !== "pending")
+              break;
+
+            if ($attempt == 10)
+              throw new Exception("authorization still pending after $attempt attempts");
+          }
+
+          if ($authorization["status"] !== "valid")
+            throw new Exception($authorization["challenges"][0]["error"]["type"] . "<br>" . $authorization["challenges"][0]["error"]["detail"]);
+        }
+      }
+      finally
+      {
+        // *** DELETE HTTP-01 CHALLENGE FILES ***
+
+        foreach ($challengetokens as $challengetoken)
+          $this->deleteFile("./.well-known/acme-challenge/$challengetoken");
+      }
+
+      // *** GENERATE CERTIFICATE KEY ***
+
+      $options = [
+        "digest_alg"       => "sha256",
+        "private_key_bits" => 2048,
+        "private_key_type" => OPENSSL_KEYTYPE_RSA
+      ];
+
+      $certificateKeyObject = openssl_pkey_new($options);
+
+      if ($certificateKeyObject === false)
+        throw new Exception("generate certificate key failed");
+
+      if (!openssl_pkey_export($certificateKeyObject, $certificateKey))
+        throw new Exception("export certificate key failed");
+
+      // *** GENERATE CSR ***
+
+      $dn = [
+        "commonName" => $identifiers[0]["value"]
+      ];
+
+      $options = [
+        "digest_alg" => "sha256",
+        "config" => $this->dataDirectory . "/openssl.cnf"
+      ];
+
+      $opensslcnf =
+        "[req]\n" .
+        "distinguished_name = req_distinguished_name\n" .
+        "req_extensions = v3_req\n\n" .
+        "[req_distinguished_name]\n\n" .
+        "[v3_req]\n" .
+        "subjectAltName = @san\n\n" .
+        "[san]\n";
+
+      $i = 0;
+      foreach ($identifiers as $identifier)
+      {
+        ++$i;
+        $opensslcnf .= "DNS.$i = " . $identifier["value"] . "\n";
+      }
+
+      try
+      {
+        $this->writeFile($this->dataDirectory . "/openssl.cnf",
+                         $opensslcnf,
+                         0644);
+
+        $csrObject = openssl_csr_new($dn, $certificateKey, $options);
+
+        if ($csrObject === false)
+          throw new Exception("generate csr failed");
+      }
+      finally
+      {
+        $this->deleteFile($this->dataDirectory . "/openssl.cnf");
+      }
+
+      if (!openssl_csr_export($csrObject, $csr))
+        throw new Exception("export csr failed");
+
+      // *** FINALIZE ORDER ***
+
+      $url = $order["finalize"];
+
+      $regex = "~^-----BEGIN CERTIFICATE REQUEST-----([A-Za-z0-9+/]+)=?=?-----END CERTIFICATE REQUEST-----$~";
+      $outcome = preg_match($regex, str_replace("\n", "", $csr), $matches);
+
+      if ($outcome === false)
+        throw new Exception("extract csr failed");
+
+      if ($outcome === 0)
+        throw new Exception("csr format mismatch");
+
+      $payload = [
+        "csr" => strtr($matches[1], "+/", "-_")
+      ];
+
+      $response = $this->sendRequest($url, 200, $payload);
+
+      $order = $this->decodeJSON($response["body"]);
+
+      if ($order["status"] !== "valid")
+      {
+        // *** CHECK ORDER ***
+
+        $url = $orderurl;
+
+        $payload = ""; // empty
+
+        for ($attempt = 1; true; ++$attempt)
+        {
+          sleep(1);
+
+          $response = $this->sendRequest($url, 200, $payload);
+
+          $order = $this->decodeJSON($response["body"]);
+
+          if (!(   $order["status"] === "pending"
+                || $order["status"] === "processing"
+                || $order["status"] === "ready"))
+            break;
+
+          if ($attempt == 10)
+            throw new Exception("order still pending after $attempt attempts");
+        }
+
+        if ($order["status"] !== "valid")
+          throw new Exception("order failed");
+      }
+
+      // *** DOWNLOAD CERTIFICATE ***
+
+      $url = $order["certificate"];
+
+      $payload = ""; // empty
+
+      $response = $this->sendRequest($url, 200, $payload);
+
+      $certificate = $response["body"];
+
+      if ($_POST["environment"] == "production")
+      {
+        // *** WRITE CERTIFICATE AND KEY ***
+
+        $this->writeFile($this->dataDirectory . "/certificate.crt",
+                         $certificate,
+                         0644);
+
+        $this->writeFile($this->dataDirectory . "/certificate.key",
+                         $certificateKey,
+                         0644);
+      }
+    }
+    finally
+    {
+      $this->writeFile($this->dataDirectory . "/responses.txt",
+                       implode("\n\n-----\n\n", array_reverse($this->responses)),
+                       0644);
+    }
+  }
+
+  public function updateContact()
+  {
+    $this->responses = [];
+
+    try
+    {
+      $this->initialize();
+
+      // *** UPDATE CONTACT ***
+
+      if (!isset($_POST["emailAddresses"]))
+        throw new Exception("emailAddresses was missing");
+
+      if (!is_string($_POST["emailAddresses"]))
+        throw new Exception("emailAddresses was not a string");
+
+      $contact = [];
+
+      for ($emailAddress = strtok($_POST["emailAddresses"], "\r\n");
+           $emailAddress !== false;
+           $emailAddress = strtok("\r\n"))
+        $contact[] = "mailto:$emailAddress";
+
+      $url = $this->accountUrl;
+
+      $payload = [
+        "contact" => $contact
+      ];
+
+      $response = $this->sendRequest($url, 200, $payload);
+    }
+    finally
+    {
+      $this->writeFile($this->dataDirectory . "/responses.txt",
+                       implode("\n\n-----\n\n", array_reverse($this->responses)),
+                       0644);
+    }
+  }
+}
+
+// *** MAIN ***
+
+try
+{
+  $certsage = new CertSage();
+
+  if (!isset($_POST["action"]))
+    $page = "welcome";
+  elseif (!is_string($_POST["action"]))
+    throw new Exception("action was not a string");
+  else
+  {
+    switch ($_POST["action"])
+    {
+      case "acquirecertificate":
+
+        $certsage->acquireCertificate();
+
+        break;
+
+      case "updatecontact":
+
+        $certsage->updateContact();
+
+        break;
+
+      default:
+
+        throw new Exception("unknown action: " . $_POST["action"]);
+    }
+
+    $page = "success";
   }
 }
 catch (Exception $e)
@@ -788,11 +729,6 @@ catch (Exception $e)
   $error = $e->getMessage();
 
   $page = "trouble";
-}
-finally
-{
-  if (isset($certsage))
-    $certsage->dumpResponses("responses.txt");
 }
 ?>
 <!DOCTYPE html>
@@ -828,7 +764,7 @@ body
   padding: 1.5rem;
 }
 
-header, main, footer, article, section,
+header, main, footer, hr, article, section,
 h1, h2, h3, h4, h5, h6, p, form
 {
   margin-bottom: 1.5rem;
@@ -837,6 +773,11 @@ h1, h2, h3, h4, h5, h6, p, form
 :last-child
 {
   margin-bottom: 0;
+}
+
+hr
+{
+  border-bottom: 1px solid;
 }
 
 header, article
@@ -878,7 +819,7 @@ h1, h2, h3, h4, h5, h6
 {
   text-align: center;
   font-weight: normal;
-  line-height: 1.25;
+  line-height: 1;
 }
 
 h1
@@ -921,12 +862,7 @@ form
   text-align: center;
 }
 
-label
-{
-  font-size: calc(18rem / 12);
-}
-
-textarea, input[type=text]
+textarea
 {
   display: inline-block;
   margin-top: 0.75rem;
@@ -943,11 +879,6 @@ textarea, input[type=text]
 textarea
 {
   text-align: left;
-}
-
-input[type=text]
-{
-  text-align: center;
 }
 
 input[type=radio]
@@ -981,80 +912,162 @@ input[type=radio]:checked + span, button:active
   border: 0.1875rem solid rgba(0,0,0,0.50);
   font-weight: bold;
 }
+
+#wait
+{
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0,0,0,0.75);
+}
+
+#hourglass
+{
+  position: relative;
+  top: calc(50% - 12.5vmin);
+  left: calc(50% - 12.5vmin);
+  width: 25vmin;
+  height: 25vmin;
+  font-size: 25vmin;
+  line-height: 1;
+}
 </style>
 </head>
 <body>
 
 <header>
 <span>&#x1F9D9;&#x1F3FC;&#x200D;&#x2642;&#xFE0F; CertSage</span><br>
-version <?= $version ?><br>
+version <?= $certsage->version ?><br>
 <a href="mailto:support@griffin.software">support@griffin.software</a>
 </header>
 
 <main>
 <article>
-<?php switch ($page):
-  case "welcome": ?>
+<?php
+  switch ($page):
+    case "welcome":
+?>
 
 <h1>Welcome!</h1>
+<p>
+CertSage is an <a href="https://tools.ietf.org/html/rfc8555" target="_blank">ACME</a> client that acquires free <a href="https://en.m.wikipedia.org/wiki/Domain-validated_certificate" target="_blank">DV TLS/SSL certificates</a> from <a href="https://letsencrypt.org/about/" target="_blank">Let's Encrypt</a> by satisfying an <a href="https://letsencrypt.org/docs/challenge-types/#http-01-challenge" target="_blank">HTTP-01 challenge</a> for each <a href="https://en.m.wikipedia.org/wiki/Domain_name" target="_blank">domain name</a> to be covered by a certificate.
+By using CertSage, you are agreeing to the <a href="https://letsencrypt.org/repository/" target="_blank">Let's Encrypt Subscriber Agreement</a>.
+Please use the <a href="https://letsencrypt.org/docs/staging-environment/" target="_blank">staging environment</a> for testing to avoid hitting the <a href="https://letsencrypt.org/docs/rate-limits/" target="_blank">rate limits</a>.
+</p>
 
-<p>CertSage is an <a href="https://tools.ietf.org/html/rfc8555" target="_blank">ACME</a> client that acquires free <a href="https://en.m.wikipedia.org/wiki/Domain-validated_certificate" target="_blank">DV certificates</a> from <a href="https://letsencrypt.org/about/" target="_blank">Let's Encrypt</a> by satisfying an <a href="https://letsencrypt.org/docs/challenge-types/#http-01-challenge" target="_blank">HTTP-01 challenge</a> for each <a href="https://en.m.wikipedia.org/wiki/Domain_name" target="_blank">domain name</a> to be covered by a certificate.</p>
+<hr>
 
-<form autocomplete="off" method="post" onsubmit="document.getElementById('proceed').innerHTML = 'Processing...';">
-<label>Code</label><br>
-Contents of this file:<br>
-<?= $dataDirectory . "/code.txt" ?><br>
-<input name="code" type="text"><br>
-<br>
-<label>Environment</label><br>
-Please test using the <a href="https://letsencrypt.org/docs/staging-environment/" target="_blank">staging environment</a><br>
-to avoid hitting the <a href="https://letsencrypt.org/docs/rate-limits/" target="_blank">rate limits</a><br>
-<label><input name="environment" value="staging" type="radio"><span>Staging</span></label> <label><input name="environment" value="production" type="radio" checked><span>Production</span></label><br>
-<br>
-<label>Email Addresses</label><br>
-Only for Let's Encrypt notifications<br>
-One per line<br>
-<textarea name="emailAddresses" rows="5"></textarea><br>
-<br>
-<label>Domain Names</label><br>
-No wildcards (*)<br>
-One per line<br>
-<textarea name="domainNames" rows="5"></textarea><br>
-<br>
-<label>Subscriber Agreement</label><br>
-By proceeding you are agreeing to the<br>
-<a href="https://letsencrypt.org/repository/" target="_blank">Let's Encrypt Subscriber Agreement</a><br>
-<button id="proceed" name="action" value="proceed" type="submit">Proceed</button>
+<form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
+<h2>Acquire a Certificate</h2>
+
+<p>
+One domain name per line<br>
+No wildcards (*) allowed<br>
+<textarea name="domainNames" rows="5"></textarea>
+</p>
+
+<input name="action" value="acquirecertificate" type="hidden">
+
+<button name="environment" value="staging" type="submit">Acquire Staging Certificate</button>
+<button name="environment" value="production" type="submit">Acquire Production Certificate</button>
 </form>
 
-<?php break;
-  case "success": ?>
+<hr>
+
+<form autocomplete="off" method="post" onsubmit="document.getElementById('wait').style.display = 'block';">
+<h2>Receive Certificate Expiration Notifications</h2>
+
+<p>
+One email address per line<br>
+Leave blank to unsubscribe<br>
+<textarea name="emailAddresses" rows="5"></textarea>
+</p>
+
+<input name="action" value="updatecontact" type="hidden">
+
+<button name="environment" value="staging" type="submit">Update Staging Contact</button>
+<button name="environment" value="production" type="submit">Update Production Contact</button>
+</form>
+
+<?php
+      break;
+    case "success":
+      switch ($_POST["action"]):
+        case "acquirecertificate":
+          switch ($_POST["environment"]):
+            case "staging":
+?>
 
 <h1>Success!</h1>
 
-<?php switch ($environment):
-    case "production": ?>
+<p>A staging certificate was acquired. It was not saved to prevent accidental installation.</p>
 
-<p>If you submitted any fully qualified domain names, your new certificate and its key have been saved in <?= $dataDirectory ?>.</p>
+<p>Your likely next step is to go back to the beginning and acquire a production certificate.</p>
 
 <p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
-<p><a href="">Click here to start over.</a></p>
+<p><a href="">Go back to the beginning</a></p>
 
-<?php break;
-    case "staging": ?>
+<?php
+              break;
+            case "production":
+?>
 
-<p>Your test using the <a href="https://letsencrypt.org/docs/staging-environment/" target="_blank">staging environment</a> was successful.</p>
+<h1>Success!</h1>
 
-<p>If you want to acquire a trusted certificate, please use the production environment.</p>
+<p>Your production certificate and its private key have been saved in <?= $certsage->dataDirectory ?> and are ready to install.</p>
 
-<p><a href="">Click here to start over.</a></p>
+<p>Your likely next step is to go back to the beginning and update your production contact information.</p>
 
-<?php break;
-    endswitch; ?>
+<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
 
-<?php break;
-  case "trouble": ?>
+<p><a href="">Go back to the beginning</a></p>
+
+<?php
+              break;
+          endswitch;
+          break;
+        case "updatecontact":
+          switch ($_POST["environment"]):
+            case "staging":
+?>
+
+<h1>Success!</h1>
+
+<p>Your staging contact information has been updated.</p>
+
+<p>Your likely next step is to go back to the beginning and update your production contact information.</p>
+
+<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
+
+<p><a href="">Go back to the beginning</a></p>
+
+<?php
+              break;
+            case "production":
+?>
+
+<h1>Success!</h1>
+
+<p>Your production contact information has been updated.</p>
+
+<p>Your likely next step is to install your production certificate.</p>
+
+<p>If you like free and easy certificates, please consider donating to CertSage and Let's Encrypt using the links at the bottom of this page.</p>
+
+<p><a href="">Go back to the beginning</a></p>
+
+<?php
+              break;
+          endswitch;
+          break;
+      endswitch;
+      break;
+    case "trouble":
+?>
 
 <h1>Trouble...</h1>
 
@@ -1062,10 +1075,12 @@ By proceeding you are agreeing to the<br>
 
 <p>If you need help with resolving this issue, please post a topic in the help category of the <a href="https://community.letsencrypt.org/" target="_blank">Let's Encrypt Community</a>.</p>
 
-<p><a href="">Click here to start over.</a></p>
+<p><a href="">Go back to the beginning</a></p>
 
-<?php break;
-  endswitch; ?>
+<?php
+      break;
+  endswitch;
+?>
 </article>
 </main>
 
@@ -1078,6 +1093,8 @@ By proceeding you are agreeing to the<br>
 <br>
 &copy; 2021 <a href="https://griffin.software" target="_blank">Griffin Software</a>
 </footer>
+
+<div id="wait"><span id="hourglass">&#x23F3;</span></div>
 
 </body>
 </html>
