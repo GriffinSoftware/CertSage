@@ -15,7 +15,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 namespace CertSage;
 use Exception;
 
-$version = "3.0.0";
+$version = "3.0.1";
 $dataDirectory = "../CertSage";
 
 // *** CREATE DIRECTORY ***
@@ -1033,17 +1033,24 @@ main, p, footer
   margin-top: 1.5rem;
 }
 
-header li
+header > ul > li
 {
   display: block;
   text-align: center;
 }
 
-header li:first-child
+header > ul > li:first-of-type
 {
   font-size: 2rem;
   line-height: 2.5rem;
   font-family: fantasy;
+}
+
+img#logo
+{
+  width: 2.5rem;
+  height: 2.5rem;
+  vertical-align: bottom;
 }
 
 h1
@@ -1112,7 +1119,7 @@ button:active
   font-weight: bold;
 }
 
-footer li
+footer > ul > li
 {
   display: block;
   margin-top: 1.5rem;
@@ -1120,7 +1127,7 @@ footer li
   color: rgba(255,255,255,0.80);
 }
 
-footer li:first-child
+footer > ul > li:first-of-type
 {
   margin-top: 0;
 }
@@ -1155,7 +1162,7 @@ footer a
 <body>
 <header>
 <ul>
-<li>&#x1F9D9;&#x1F3FC;&#x200D;&#x2642;&#xFE0F; CertSage</li>
+<li><img id="logo" src="https://certsage.com/images/logo.png" alt="logo"> CertSage</li>
 <li>version <?= $version ?></li>
 <li>support@griffin.software</li>
 </ul>
@@ -1221,7 +1228,7 @@ One per line; No wildcards (*)<br>
 </p>
 
 <p>
-Key Type<br>
+Certificate Key Type<br>
 <input name="keyType" value="RSA" type="radio" <?= (!$certificate["valid"] || $certificate["keyType"] === "RSA") ? "checked" : "" ?>> RSA (more compatible)<br>
 <input name="keyType" value="EC"  type="radio" <?= ( $certificate["valid"] && $certificate["keyType"] === "EC" ) ? "checked" : "" ?>> EC  (more efficient)
 </p>

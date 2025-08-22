@@ -19,7 +19,7 @@ Assuming that your domain name is `example.com`...
 
 1. Visit `http://example.com/certsage.php`.
 2. Enter the (sub)domain names in the Domain and Subdomain Names box, one per line, for which you wish to acquire a certificate (e.g. `example.com` and `www.example.com`).
-3. Select your certificate Key Type.
+3. Select your Certificate Key Type.
 4. Enter your password into the Password box from your `password.txt` file found in your `CertSage` data directory, which is located in the parent directory of the directory where you uploaded `certsage.php`.
 5. Press the Test button if you want to confirm that your CertSage installation is working properly or the Acquire Certificate and Install into cPanel button if you are confident that your CertSage installation is working properly.
 
