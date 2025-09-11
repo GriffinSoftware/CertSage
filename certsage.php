@@ -15,7 +15,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 namespace CertSage;
 use Exception;
 
-$version = "3.0.1";
+$version = "3.0.2";
 $dataDirectory = "../CertSage";
 
 // *** CREATE DIRECTORY ***
@@ -986,6 +986,7 @@ catch (Exception $e)
 <head>
 <meta charset="utf-8">
 <title>CertSage</title>
+<meta name="author" content="Jonathan Griffin">
 <meta name="description" content="CertSage">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#e1b941">
@@ -1044,6 +1045,12 @@ header > ul > li:first-of-type
   font-size: 2rem;
   line-height: 2.5rem;
   font-family: fantasy;
+}
+
+header a
+{
+  text-decoration: none;
+  color: inherit;
 }
 
 img#logo
@@ -1162,7 +1169,7 @@ footer a
 <body>
 <header>
 <ul>
-<li><img id="logo" src="https://certsage.com/images/logo.png" alt="logo"> CertSage</li>
+<li><a href="https://certsage.com/" target="_blank"><img id="logo" src="https://certsage.com/images/logo.png" alt="logo"> CertSage</a></li>
 <li>version <?= $version ?></li>
 <li>support@griffin.software</li>
 </ul>
