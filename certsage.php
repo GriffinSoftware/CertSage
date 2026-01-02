@@ -15,7 +15,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 namespace CertSage;
 use Exception;
 
-$version = "3.0.2";
+$version = "3.1.0";
 $dataDirectory = "../CertSage";
 
 // *** CREATE DIRECTORY ***
@@ -284,398 +284,387 @@ function acquireCertificate($environment)
   global $dataDirectory;
   global $account;
 
-  $account = [];
-  $account["responses"] = [];
+  // *** ESTABLISH ENVIRONMENT ***
+
+  switch ($environment)
+  {
+    case "production":
+
+      $filename = "account.key";
+      $url = "https://acme-v02.api.letsencrypt.org/directory";
+      break;
+
+    case "staging":
+
+      $filename = "account-staging.key";
+      $url = "https://acme-staging-v02.api.letsencrypt.org/directory";
+      break;
+  }
+
+  $accountKeyExists = fileExists($filename);
+
+  if ($accountKeyExists)
+  {
+    // *** READ ACCOUNT KEY ***
+
+    $account["key"] = readFile($filename);
+
+    // *** CHECK ACCOUNT KEY ***
+
+    $accountKeyObject = openssl_pkey_get_private($account["key"]);
+
+    if ($accountKeyObject === false)
+      throw new Exception("check account key failed");
+  }
+  else
+  {
+    // *** GENERATE ACCOUNT KEY ***
+
+    $options = [
+      "private_key_bits" => 2048,
+      "private_key_type" => OPENSSL_KEYTYPE_RSA
+    ];
+
+    $accountKeyObject = openssl_pkey_new($options);
+
+    if ($accountKeyObject === false)
+      throw new Exception("generate account key failed");
+
+    if (!openssl_pkey_export($accountKeyObject, $account["key"]))
+      throw new Exception("export account key failed");
+  }
+
+  // *** GET ACCOUNT KEY DETAILS ***
+
+  $accountKeyDetails = openssl_pkey_get_details($accountKeyObject);
+
+  if ($accountKeyDetails === false)
+    throw new Exception("get account key details failed");
+
+  // *** CONSTRUCT JWK ***
+
+  $jwk = [
+    "e" => encodeBase64($accountKeyDetails["rsa"]["e"]), // public exponent
+    "kty" => "RSA",
+    "n" => encodeBase64($accountKeyDetails["rsa"]["n"])  // modulus
+  ];
+
+  // *** CALCULATE THUMBPRINT ***
+
+  $digest = openssl_digest(encodeJSON($jwk), "sha256", true);
+
+  if ($digest === false)
+    throw new Exception("digest JWK failed");
+
+  $thumbprint = encodeBase64($digest);
+
+  // *** GET ACME DIRECTORY ***
+
+  $response = sendRequest($url, 200);
+
+  $account["acmeDirectory"] = decodeJSON($response["body"]);
+
+  if ($accountKeyExists)
+  {
+    // *** LOOKUP ACCOUNT ***
+
+    $url = $account["acmeDirectory"]["newAccount"];
+
+    $payload = [
+      "onlyReturnExisting" => true
+    ];
+
+    $response = sendRequest($url, 200, $payload, $jwk);
+  }
+  else
+  {
+    // *** REGISTER ACCOUNT ***
+
+    $url = $account["acmeDirectory"]["newAccount"];
+
+    $payload = [
+      "termsOfServiceAgreed" => true
+    ];
+
+    $response = sendRequest($url, 201, $payload, $jwk);
+
+    // *** WRITE ACCOUNT KEY ***
+
+    writeFile($filename, $account["key"]);
+  }
+
+  $account["URL"] = findHeader($response, "location");
+
+  // *** CREATE NEW ORDER ***
+
+  if (!isset($_POST["identifiers"]))
+    throw new Exception("identifiers was missing");
+
+  if (!is_string($_POST["identifiers"]))
+    throw new Exception("identifiers was not a string");
+
+  $identifiers = [];
+
+  for ($identifier = strtok($_POST["identifiers"], "\r\n");
+       $identifier !== false;
+       $identifier = strtok("\r\n"))
+    $identifiers[] = [
+      "type"  => "dns",
+      "value" => $identifier
+    ];
+
+  $url = $account["acmeDirectory"]["newOrder"];
+
+  $payload = [
+    "identifiers" => $identifiers
+  ];
+
+  $response = sendRequest($url, 201, $payload);
+
+  $orderurl = findHeader($response, "location");
+  $order = decodeJSON($response["body"]);
+
+  // *** GET CHALLENGES ***
+
+  $authorizationurls = [];
+  $challengeurls = [];
+  $challengetokens = [];
+
+  $payload = ""; // empty
+
+  foreach ($order["authorizations"] as $url)
+  {
+    $response = sendRequest($url, 200, $payload);
+
+    $authorization = decodeJSON($response["body"]);
+
+    if ($authorization["status"] === "valid")
+      continue;
+
+    $authorizationurls[] = $url;
+
+    foreach ($authorization["challenges"] as $challenge)
+    {
+      if ($challenge["type"] === "http-01")
+      {
+        $challengeurls[] = $challenge["url"];
+        $challengetokens[] = $challenge["token"];
+        continue 2;
+      }
+    }
+
+    throw new Exception("no http-01 challenge found");
+  }
+
+  // *** CREATE HTTP-01 CHALLENGE DIRECTORIES ***
+
+  createDirectory("./.well-known");
+  createDirectory("./.well-known/acme-challenge");
 
   try
   {
-    // *** ESTABLISH ENVIRONMENT ***
+    // *** WRITE HTTP-01 CHALLENGE FILES ***
 
-    switch ($environment)
-    {
-      case "production":
+    foreach ($challengetokens as $challengetoken)
+      writeFile("./.well-known/acme-challenge/$challengetoken",
+                "$challengetoken.$thumbprint",
+                false);
 
-        $filename = "account.key";
-        $url = "https://acme-v02.api.letsencrypt.org/directory";
-        break;
+    // delay for creation of challenge files
+    sleep(2);
 
-      case "staging":
+    // *** CONFIRM CHALLENGES ***
 
-        $filename = "account-staging.key";
-        $url = "https://acme-staging-v02.api.letsencrypt.org/directory";
-        break;
-    }
+    $payload = (object)[]; // empty object
 
-    $accountKeyExists = fileExists($filename);
+    foreach ($challengeurls as $url)
+      $challenge = sendRequest($url, 200, $payload);
 
-    if ($accountKeyExists)
-    {
-      // *** READ ACCOUNT KEY ***
+    // delay for processing of challenges
+    sleep(6);
 
-      $account["key"] = readFile($filename);
-
-      // *** CHECK ACCOUNT KEY ***
-
-      $accountKeyObject = openssl_pkey_get_private($account["key"]);
-
-      if ($accountKeyObject === false)
-        throw new Exception("check account key failed");
-    }
-    else
-    {
-      // *** GENERATE ACCOUNT KEY ***
-
-      $options = [
-        "private_key_bits" => 2048,
-        "private_key_type" => OPENSSL_KEYTYPE_RSA
-      ];
-
-      $accountKeyObject = openssl_pkey_new($options);
-
-      if ($accountKeyObject === false)
-        throw new Exception("generate account key failed");
-
-      if (!openssl_pkey_export($accountKeyObject, $account["key"]))
-        throw new Exception("export account key failed");
-    }
-
-    // *** GET ACCOUNT KEY DETAILS ***
-
-    $accountKeyDetails = openssl_pkey_get_details($accountKeyObject);
-
-    if ($accountKeyDetails === false)
-      throw new Exception("get account key details failed");
-
-    // *** CONSTRUCT JWK ***
-
-    $jwk = [
-      "e" => encodeBase64($accountKeyDetails["rsa"]["e"]), // public exponent
-      "kty" => "RSA",
-      "n" => encodeBase64($accountKeyDetails["rsa"]["n"])  // modulus
-    ];
-
-    // *** CALCULATE THUMBPRINT ***
-
-    $digest = openssl_digest(encodeJSON($jwk), "sha256", true);
-
-    if ($digest === false)
-      throw new Exception("digest JWK failed");
-
-    $thumbprint = encodeBase64($digest);
-
-    // *** GET ACME DIRECTORY ***
-
-    $response = sendRequest($url, 200);
-
-    $account["acmeDirectory"] = decodeJSON($response["body"]);
-
-    if ($accountKeyExists)
-    {
-      // *** LOOKUP ACCOUNT ***
-
-      $url = $account["acmeDirectory"]["newAccount"];
-
-      $payload = [
-        "onlyReturnExisting" => true
-      ];
-
-      $response = sendRequest($url, 200, $payload, $jwk);
-    }
-    else
-    {
-      // *** REGISTER ACCOUNT ***
-
-      $url = $account["acmeDirectory"]["newAccount"];
-
-      $payload = [
-        "termsOfServiceAgreed" => true
-      ];
-
-      $response = sendRequest($url, 201, $payload, $jwk);
-
-      // *** WRITE ACCOUNT KEY ***
-
-      writeFile($filename, $account["key"]);
-    }
-
-    $account["URL"] = findHeader($response, "location");
-
-    // *** CREATE NEW ORDER ***
-
-    if (!isset($_POST["identifiers"]))
-      throw new Exception("identifiers was missing");
-
-    if (!is_string($_POST["identifiers"]))
-      throw new Exception("identifiers was not a string");
-
-    $identifiers = [];
-
-    for ($identifier = strtok($_POST["identifiers"], "\r\n");
-         $identifier !== false;
-         $identifier = strtok("\r\n"))
-      $identifiers[] = [
-        "type"  => "dns",
-        "value" => $identifier
-      ];
-
-    $url = $account["acmeDirectory"]["newOrder"];
-
-    $payload = [
-      "identifiers" => $identifiers
-    ];
-
-    $response = sendRequest($url, 201, $payload);
-
-    $orderurl = findHeader($response, "location");
-    $order = decodeJSON($response["body"]);
-
-    // *** GET CHALLENGES ***
-
-    $authorizationurls = [];
-    $challengeurls = [];
-    $challengetokens = [];
+    // *** CHECK AUTHORIZATIONS ***
 
     $payload = ""; // empty
 
-    foreach ($order["authorizations"] as $url)
+    foreach ($authorizationurls as $url)
     {
-      $response = sendRequest($url, 200, $payload);
-
-      $authorization = decodeJSON($response["body"]);
-
-      if ($authorization["status"] === "valid")
-        continue;
-
-      $authorizationurls[] = $url;
-
-      foreach ($authorization["challenges"] as $challenge)
-      {
-        if ($challenge["type"] === "http-01")
-        {
-          $challengeurls[] = $challenge["url"];
-          $challengetokens[] = $challenge["token"];
-          continue 2;
-        }
-      }
-
-      throw new Exception("no http-01 challenge found");
-    }
-
-    // *** CREATE HTTP-01 CHALLENGE DIRECTORIES ***
-
-    createDirectory("./.well-known");
-    createDirectory("./.well-known/acme-challenge");
-
-    try
-    {
-      // *** WRITE HTTP-01 CHALLENGE FILES ***
-
-      foreach ($challengetokens as $challengetoken)
-        writeFile("./.well-known/acme-challenge/$challengetoken",
-                  "$challengetoken.$thumbprint",
-                  false);
-
-      // delay for creation of challenge files
-      sleep(2);
-
-      // *** CONFIRM CHALLENGES ***
-
-      $payload = (object)[]; // empty object
-
-      foreach ($challengeurls as $url)
-        $challenge = sendRequest($url, 200, $payload);
-
-      // delay for processing of challenges
-      sleep(6);
-
-      // *** CHECK AUTHORIZATIONS ***
-
-      $payload = ""; // empty
-
-      foreach ($authorizationurls as $url)
-      {
-        for ($attempt = 1; true; ++$attempt)
-        {
-          $response = sendRequest($url, 200, $payload);
-
-          $authorization = decodeJSON($response["body"]);
-
-          if ($authorization["status"] !== "pending")
-            break;
-
-          if ($attempt == 10)
-            throw new Exception("authorization still pending after $attempt attempts");
-
-          // linear backoff
-          sleep(2);
-        }
-
-        if ($authorization["status"] !== "valid")
-          throw new Exception($authorization["challenges"][0]["error"]["type"] . "<br>" . $authorization["challenges"][0]["error"]["detail"]);
-      }
-    }
-    finally
-    {
-      // *** DELETE HTTP-01 CHALLENGE FILES ***
-
-      foreach ($challengetokens as $challengetoken)
-        deleteFile("./.well-known/acme-challenge/$challengetoken", false);
-    }
-
-    // *** GENERATE CERTIFICATE KEY ***
-
-    switch ($_POST["keyType"])
-    {
-      case "RSA":
-
-        $options = [
-          "private_key_bits" => 2048,
-          "private_key_type" => OPENSSL_KEYTYPE_RSA
-        ];
-        break;
-
-      case "EC":
-
-        $options = [
-          "curve_name" => "secp384r1",
-          "private_key_type" => OPENSSL_KEYTYPE_EC
-        ];
-        break;
-
-      default:
-
-        throw new Exception("unknown keyType: " . $_POST["keyType"]);
-    }
-
-    $certificateKeyObject = openssl_pkey_new($options);
-
-    if ($certificateKeyObject === false)
-      throw new Exception("generate certificate key failed");
-
-    if (!openssl_pkey_export($certificateKeyObject, $certificateKey))
-      throw new Exception("export certificate key failed");
-
-    // *** GENERATE CSR ***
-
-    $dn = [
-      "commonName" => $identifiers[0]["value"]
-    ];
-
-    $options = [
-      "digest_alg" => "sha256",
-      "config" => "$dataDirectory/openssl.cnf"
-    ];
-
-    $opensslcnf =
-      "[req]\n" .
-      "distinguished_name = req_distinguished_name\n" .
-      "req_extensions = v3_req\n\n" .
-      "[req_distinguished_name]\n\n" .
-      "[v3_req]\n" .
-      "subjectAltName = @san\n\n" .
-      "[san]\n";
-
-    $i = 0;
-    foreach ($identifiers as $identifier)
-    {
-      ++$i;
-      $opensslcnf .= "DNS.$i = " . $identifier["value"] . "\n";
-    }
-
-    try
-    {
-      writeFile("openssl.cnf", $opensslcnf);
-
-      $csrObject = openssl_csr_new($dn, $certificateKey, $options);
-
-      if ($csrObject === false)
-        throw new Exception("generate csr failed");
-    }
-    finally
-    {
-      deleteFile("openssl.cnf");
-    }
-
-    if (!openssl_csr_export($csrObject, $csr))
-      throw new Exception("export csr failed");
-
-    // *** FINALIZE ORDER ***
-
-    $url = $order["finalize"];
-
-    $outcome = preg_match("~^-----BEGIN CERTIFICATE REQUEST-----([^\-]+)-----END CERTIFICATE REQUEST-----~",
-                          str_replace("\n", "", $csr),
-                          $matches);
-
-    if ($outcome === false)
-      throw new Exception("extract csr failed");
-
-    if ($outcome === 0)
-      throw new Exception("csr format mismatch");
-
-    $payload = [
-      "csr" => strtr(rtrim($matches[1], "="), "+/", "-_")
-    ];
-
-    $response = sendRequest($url, 200, $payload);
-
-    $order = decodeJSON($response["body"]);
-
-    if ($order["status"] !== "valid")
-    {
-      // delay for finalizing order
-      sleep(2);
-
-      // *** CHECK ORDER ***
-
-      $url = $orderurl;
-
-      $payload = ""; // empty
-
       for ($attempt = 1; true; ++$attempt)
       {
         $response = sendRequest($url, 200, $payload);
 
-        $order = decodeJSON($response["body"]);
+        $authorization = decodeJSON($response["body"]);
 
-        if (!(   $order["status"] === "pending"
-              || $order["status"] === "processing"
-              || $order["status"] === "ready"))
+        if ($authorization["status"] !== "pending")
           break;
 
         if ($attempt == 10)
-          throw new Exception("order still pending after $attempt attempts");
+          throw new Exception("authorization still pending after $attempt attempts");
 
         // linear backoff
         sleep(2);
       }
 
-      if ($order["status"] !== "valid")
-        throw new Exception("order failed");
-    }
-
-    // *** DOWNLOAD CERTIFICATE ***
-
-    $url = $order["certificate"];
-
-    $payload = ""; // empty
-
-    $response = sendRequest($url, 200, $payload);
-
-    $certificate = $response["body"];
-
-    if ($environment === "production")
-    {
-      // *** WRITE CERTIFICATE AND CERTIFICATE KEY ***
-
-      writeFile("certificate.crt", $certificate);
-      writeFile("certificate.key", $certificateKey);
+      if ($authorization["status"] !== "valid")
+        throw new Exception($authorization["challenges"][0]["error"]["type"] . "<br>" . $authorization["challenges"][0]["error"]["detail"]);
     }
   }
   finally
   {
-    writeFile("responses.txt",
-              implode("\n\n-----\n\n", array_reverse($account["responses"])));
+    // *** DELETE HTTP-01 CHALLENGE FILES ***
+
+    foreach ($challengetokens as $challengetoken)
+      deleteFile("./.well-known/acme-challenge/$challengetoken", false);
+  }
+
+  // *** GENERATE CERTIFICATE KEY ***
+
+  switch ($_POST["keyType"])
+  {
+    case "RSA":
+
+      $options = [
+        "private_key_bits" => 2048,
+        "private_key_type" => OPENSSL_KEYTYPE_RSA
+      ];
+      break;
+
+    case "EC":
+
+      $options = [
+        "curve_name" => "secp384r1",
+        "private_key_type" => OPENSSL_KEYTYPE_EC
+      ];
+      break;
+
+    default:
+
+      throw new Exception("unknown keyType: " . $_POST["keyType"]);
+  }
+
+  $certificateKeyObject = openssl_pkey_new($options);
+
+  if ($certificateKeyObject === false)
+    throw new Exception("generate certificate key failed");
+
+  if (!openssl_pkey_export($certificateKeyObject, $certificateKey))
+    throw new Exception("export certificate key failed");
+
+  // *** GENERATE CSR ***
+
+  $dn = [
+    "commonName" => $identifiers[0]["value"]
+  ];
+
+  $options = [
+    "digest_alg" => "sha256",
+    "config" => "$dataDirectory/openssl.cnf"
+  ];
+
+  $opensslcnf =
+    "[req]\n" .
+    "distinguished_name = req_distinguished_name\n" .
+    "req_extensions = v3_req\n\n" .
+    "[req_distinguished_name]\n\n" .
+    "[v3_req]\n" .
+    "subjectAltName = @san\n\n" .
+    "[san]\n";
+
+  $i = 0;
+  foreach ($identifiers as $identifier)
+  {
+    ++$i;
+    $opensslcnf .= "DNS.$i = " . $identifier["value"] . "\n";
+  }
+
+  try
+  {
+    writeFile("openssl.cnf", $opensslcnf);
+
+    $csrObject = openssl_csr_new($dn, $certificateKey, $options);
+
+    if ($csrObject === false)
+      throw new Exception("generate csr failed");
+  }
+  finally
+  {
+    deleteFile("openssl.cnf");
+  }
+
+  if (!openssl_csr_export($csrObject, $csr))
+    throw new Exception("export csr failed");
+
+  // *** FINALIZE ORDER ***
+
+  $url = $order["finalize"];
+
+  $outcome = preg_match("~^-----BEGIN CERTIFICATE REQUEST-----([^\-]+)-----END CERTIFICATE REQUEST-----~",
+                        str_replace("\n", "", $csr),
+                        $matches);
+
+  if ($outcome === false)
+    throw new Exception("extract csr failed");
+
+  if ($outcome === 0)
+    throw new Exception("csr format mismatch");
+
+  $payload = [
+    "csr" => strtr(rtrim($matches[1], "="), "+/", "-_")
+  ];
+
+  $response = sendRequest($url, 200, $payload);
+
+  $order = decodeJSON($response["body"]);
+
+  if ($order["status"] !== "valid")
+  {
+    // delay for finalizing order
+    sleep(2);
+
+    // *** CHECK ORDER ***
+
+    $url = $orderurl;
+
+    $payload = ""; // empty
+
+    for ($attempt = 1; true; ++$attempt)
+    {
+      $response = sendRequest($url, 200, $payload);
+
+      $order = decodeJSON($response["body"]);
+
+      if (!(   $order["status"] === "pending"
+            || $order["status"] === "processing"
+            || $order["status"] === "ready"))
+        break;
+
+      if ($attempt == 10)
+        throw new Exception("order still pending after $attempt attempts");
+
+      // linear backoff
+      sleep(2);
+    }
+
+    if ($order["status"] !== "valid")
+      throw new Exception("order failed");
+  }
+
+  // *** DOWNLOAD CERTIFICATE ***
+
+  $url = $order["certificate"];
+
+  $payload = ""; // empty
+
+  $response = sendRequest($url, 200, $payload);
+
+  $certificate = $response["body"];
+
+  if ($environment === "production")
+  {
+    // *** WRITE CERTIFICATE AND CERTIFICATE KEY ***
+
+    writeFile("certificate.crt", $certificate);
+    writeFile("certificate.key", $certificateKey);
   }
 }
 
@@ -684,6 +673,7 @@ function acquireCertificate($environment)
 function importCertificate()
 {
   global $certificate;
+  global $account;
 
   $certificate = [];
   $certificate["valid"] = false;
@@ -748,12 +738,33 @@ function importCertificate()
   if ($certificateData === false)
     throw new Exception("parse certificate failed");
 
+  // *** GET ACME DIRECTORY ***
+
+  $url = "https://acme-v02.api.letsencrypt.org/directory";
+
+  $response = sendRequest($url, 200);
+
+  $account["acmeDirectory"] = decodeJSON($response["body"]);
+
+  // *** GET ACME RENEWAL INFORMATION (ARI) ***
+
+  $aki = encodeBase64(hex2bin(str_replace(":", "", substr(rtrim($certificateData["extensions"]["authorityKeyIdentifier"]), 6))));
+
+  $serialNumber = encodeBase64(hex2bin("00" . $certificateData["serialNumberHex"]));
+
+  $url = $account["acmeDirectory"]["renewalInfo"] . "/$aki.$serialNumber";
+
+  $response = sendRequest($url, 200);
+
+  $ari = decodeJSON($response["body"]);
+
   // *** EXTRACT TIMES ***
 
   $time = time();
   $certificate["validFrom"] = (int)$certificateData["validFrom_time_t"];
   $certificate["validTo"]   = (int)$certificateData["validTo_time_t"];
-  $certificate["renewAt"]   = intdiv($certificate["validFrom"] + $certificate["validTo"] * 2, 3);
+  // $certificate["renewAt"]   = intdiv($certificate["validFrom"] + $certificate["validTo"] * 2, 3);
+  $certificate["renewAt"]   = strtotime($ari["suggestedWindow"]["start"]);
   $certificate["renewNow"]  = $time >= $certificate["renewAt"];
   $certificate["expired"]   = $time >= $certificate["validTo"];
 
@@ -884,6 +895,9 @@ function installCertificate()
 
 // *** MAIN ***
 
+$account = [];
+$account["responses"] = [];
+
 try
 {
   if (isset($_POST["action"]))
@@ -980,6 +994,13 @@ catch (Exception $e)
   $page = "trouble";
   $message = $e->getMessage();
 }
+finally
+{
+  // *** LOG ANY RESPONSES FROM ACME SERVER ***
+
+  writeFile("responses.txt",
+            implode("\n\n-----\n\n", array_reverse($account["responses"])));
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -991,6 +1012,7 @@ catch (Exception $e)
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#e1b941">
 <meta name="referrer" content="origin">
+<link rel="canonical" href="https://certsage.com/">
 <style>
 *
 {
