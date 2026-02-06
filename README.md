@@ -1,3 +1,6 @@
+> [!NOTE]
+> If you are upgrading from a version of CertSage prior to 3.2.0, you will need to manually add "?autorenew" to the end of your existing cron job command for autorenewals to work correctly. Your new cronjob command should then end with "certsage.php?autorenew".
+
 # Introduction
 
 CertSage was designed for people of all ages and experience levels who want an incredibly quick and easy way to acquire Let's Encrypt TLS/SSL certificates. CertSage is especially helpful if you are using a shared hosting plan that does not allow root access, such as with GoDaddy or tsoHost. It's free, of course!
