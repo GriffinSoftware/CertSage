@@ -1,5 +1,5 @@
 > [!NOTE]
-> If you are upgrading from a version of CertSage prior to 3.2.0, you will need to manually add "?autorenew" to the end of your existing cron job command for autorenewals to work correctly. Your new cronjob command should then end with "certsage.php?autorenew".
+> If you are upgrading from a version of CertSage prior to 3.2.0, you will need to manually add "?autorenew -sS" to the end of your existing cron job command for autorenewals to work correctly. Your new cronjob command should then end with "certsage.php?autorenew -sS".
 
 # Introduction
 
