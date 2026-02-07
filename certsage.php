@@ -15,7 +15,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 namespace CertSage;
 use Exception;
 
-$version = "3.2.0";
+$version = "3.2.1";
 $dataDirectory = "../CertSage";
 
 function createDirectory($directory)
@@ -791,7 +791,7 @@ function installCertificate()
   {
     unset($output);
 
-    $return = exec("(crontab -l 2>/dev/null; echo 30 15 \\* \\* \\* curl https://$domain/certsage.php?autorenew) | crontab -", $output, $result_code);
+    $return = exec("(crontab -l 2>/dev/null; echo 30 15 \\* \\* \\* curl -sS https://$domain/certsage.php?autorenew) | crontab -", $output, $result_code);
 
     if ($return === false)
       throw new Exception("shell execution pipe could not be established");
