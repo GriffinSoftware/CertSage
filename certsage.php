@@ -15,7 +15,7 @@ Usage of this software constitutes acceptance of full liability for any conseque
 namespace CertSage;
 use Exception;
 
-$version = "3.2.1";
+$version = "3.3.1";
 $dataDirectory = "../CertSage";
 
 function createDirectory($directory)
@@ -586,6 +586,8 @@ function acquireCertificate($environment)
     if ($order["status"] !== "valid")
       throw new Exception("order failed");
   }
+
+  sleep(2); // delay for downloading certificate
 
   $url = $order["certificate"];
 
